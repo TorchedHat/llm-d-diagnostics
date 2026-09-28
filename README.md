@@ -17,6 +17,10 @@ cp examples/env.sh.example clusters/my-cluster/env.sh
 # Edit env.sh with your namespace, model, images
 
 # 2. Deploy
+# Optional: validate/render resources without writing to the cluster
+DRY_RUN=client ./scripts/deploy.sh clusters/my-cluster
+# Or, against an existing namespace, ask the API server to validate them:
+DRY_RUN=server ./scripts/deploy.sh clusters/my-cluster
 ./scripts/deploy.sh clusters/my-cluster
 
 # 3. Run all non-destructive experiments
@@ -100,6 +104,12 @@ SIM=1 ./toolkit/run.sh clusters/my-sim latency
 Sim mode exercises the sidecar routing and measurement pipeline with
 canned responses. No real model, no KV cache, no NIXL transfer — the
 numbers don't reflect real inference.
+
+The GPU deployment defaults are pinned to the llm-d v0.9.0 compatibility
+matrix (vLLM v0.26.0 and router disaggregation sidecar v0.10.0). Override
+`VLLM_IMAGE` for the accelerator-specific vLLM image in your cluster. Set
+`GPU_RESOURCE_NAME` to the extended resource name exposed by its device
+plugin; the default is `nvidia.com/gpu`.
 
 ## Profiling Tools
 

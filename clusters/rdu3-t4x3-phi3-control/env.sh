@@ -16,8 +16,10 @@ export DTYPE=float16
 export DATA_DIR="clusters/rdu3-t4x3-phi3-control/data"
 
 # Images
-export VLLM_IMAGE="vllm/vllm-openai:v0.18.1"
-export SIDECAR_IMAGE="ghcr.io/llm-d/llm-d-routing-sidecar:v0.6.1"
+export VLLM_IMAGE="vllm/vllm-openai:v0.26.0"
+export SIDECAR_IMAGE="ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0"
+export GPU_RESOURCE_NAME="nvidia.com/gpu"
+export SIDECAR_SCHEME="http"
 
 # Model cache PVC
 export MODEL_CACHE_SIZE="50Gi"

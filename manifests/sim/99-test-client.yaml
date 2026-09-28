@@ -4,7 +4,7 @@ metadata:
   name: test-client
   labels:
     app: test-client
-    app.kubernetes.io/part-of: vllm-disagg
+    app.kubernetes.io/part-of: vllm-disagg-sim
 spec:
   containers:
   - name: python

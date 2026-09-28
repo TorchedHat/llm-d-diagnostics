@@ -3,12 +3,13 @@
 #
 # Usage:
 #   ./scripts/deploy.sh clusters/my-cluster
-#   ./scripts/deploy.sh clusters/my-cluster sim    # skip test-client
+#   ./scripts/deploy.sh clusters/my-cluster sim    # GPU-free inference-sim stack
+#   DRY_RUN=server ./scripts/deploy.sh clusters/my-cluster
 #
 # Reads cluster config from <cluster-dir>/env.sh. Topology is controlled by:
 #   PREFILL_REPLICAS=2 DECODE_REPLICAS=3 → 2P+3D (5 GPUs)
 #
-# Aligned with upstream llm-d patterns (llm-d-deployer basic-gpu-with-nixl-preset):
+# Aligned with the llm-d v0.9.0 P/D manifests (modelserver/gpu/vllm):
 #   - Deployments (not StatefulSets)
 #   - kv_role: kv_both (bidirectional KV, both stages can prefill or decode)
 #   - Native sidecar (initContainer with restartPolicy: Always, K8s 1.29+)
@@ -32,8 +33,22 @@
 
 set -euo pipefail
 
-CLUSTER_DIR="${1:?Usage: $0 <cluster-dir> [sim]}"
+CLUSTER_DIR="${1:?Usage: $0 <cluster-dir> [gpu|sim]}"
 MODE="${2:-gpu}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SIM_MANIFEST_DIR="$REPO_ROOT/manifests/sim"
+DRY_RUN="${DRY_RUN:-}"
+
+case "$MODE" in
+    gpu|sim) ;;
+    *) echo "ERROR: mode must be 'gpu' or 'sim' (got '$MODE')"; exit 2 ;;
+esac
+
+case "$DRY_RUN" in
+    ""|client|server) ;;
+    *) echo "ERROR: DRY_RUN must be empty, 'client', or 'server'"; exit 2 ;;
+esac
 
 if [ ! -f "$CLUSTER_DIR/env.sh" ]; then
     echo "ERROR: $CLUSTER_DIR/env.sh not found"
@@ -46,13 +61,29 @@ source "$CLUSTER_DIR/env.sh"
 PREFILL_REPLICAS="${PREFILL_REPLICAS:-1}"
 DECODE_REPLICAS="${DECODE_REPLICAS:-2}"
 
-# Images
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.18.1}"
-SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-routing-sidecar:v0.6.1}"
+# Images pinned to the llm-d v0.9.0 release matrix. Override in env.sh to
+# select another vLLM build for the target accelerator or a newer compatible
+# llm-d router sidecar release.
+VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.26.0}"
+SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0}"
+GPU_RESOURCE_NAME="${GPU_RESOURCE_NAME:-nvidia.com/gpu}"
+SIDECAR_SCHEME="${SIDECAR_SCHEME:-http}"
 MODEL_CACHE_SIZE="${MODEL_CACHE_SIZE:-50Gi}"
 
 # NIXL side channel port (upstream default: 5557)
 NIXL_PORT="${NIXL_PORT:-5557}"
+
+for var in PREFILL_REPLICAS DECODE_REPLICAS NIXL_PORT; do
+    val="${!var}"
+    if ! [[ "$val" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: $var must be an integer (got '$val')"
+        exit 1
+    fi
+done
+if (( NIXL_PORT < 1 || NIXL_PORT > 65535 )); then
+    echo "ERROR: NIXL_PORT must be between 1 and 65535"
+    exit 1
+fi
 
 # Validate image names (prevent injection via env.sh)
 for var in VLLM_IMAGE SIDECAR_IMAGE; do
@@ -63,20 +94,84 @@ for var in VLLM_IMAGE SIDECAR_IMAGE; do
     fi
 done
 
+if ! [[ "$GPU_RESOURCE_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9./_-]*$ ]]; then
+    echo "ERROR: Invalid GPU_RESOURCE_NAME: $GPU_RESOURCE_NAME"
+    exit 1
+fi
+if [[ "$SIDECAR_SCHEME" != "http" && "$SIDECAR_SCHEME" != "https" ]]; then
+    echo "ERROR: SIDECAR_SCHEME must be 'http' or 'https'"
+    exit 1
+fi
+SIDECAR_SECURE_PROXY=false
+[[ "$SIDECAR_SCHEME" == "https" ]] && SIDECAR_SECURE_PROXY=true
+
+oc_apply() {
+    if [[ -n "$DRY_RUN" ]]; then
+        oc apply "--dry-run=$DRY_RUN" "$@"
+    else
+        oc apply "$@"
+    fi
+}
+
 echo "Cluster:     $CLUSTER_DIR"
 echo "Namespace:   $NS"
 echo "Model:       $MODEL"
 echo "Topology:    ${PREFILL_REPLICAS}P + ${DECODE_REPLICAS}D"
 echo "vLLM image:  $VLLM_IMAGE"
 echo "Sidecar:     $SIDECAR_IMAGE"
+echo "GPU resource: $GPU_RESOURCE_NAME"
+echo "Sidecar URL:  $SIDECAR_SCHEME"
 echo "PVC size:    $MODEL_CACHE_SIZE"
 echo ""
 
-# Create namespace if it doesn't exist
-oc get namespace "$NS" &>/dev/null || oc create namespace "$NS"
+# Create namespace if it doesn't exist. Client dry-run is useful for rendering
+# on a workstation without needing the target namespace to exist.
+if [[ "$DRY_RUN" == "client" ]]; then
+    echo "Client dry-run: skipping namespace lookup/creation."
+elif ! oc get namespace "$NS" &>/dev/null; then
+    if [[ "$DRY_RUN" == "server" ]]; then
+        echo "ERROR: namespace '$NS' must already exist for a server dry-run"
+        exit 1
+    fi
+    oc create namespace "$NS"
+fi
+
+# Simulation mode must deploy the simulator manifests rather than the GPU
+# topology. Keep the model name configurable through the same env.sh setting.
+if [[ "$MODE" == "sim" ]]; then
+    echo "Deploying GPU-free inference-sim mode..."
+    oc_apply -n "$NS" -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-model-config
+  labels:
+    app.kubernetes.io/part-of: vllm-disagg-sim
+data:
+  MODEL_NAME: "$MODEL"
+EOF
+    if [[ -n "$DRY_RUN" ]]; then
+        for manifest in "$SIM_MANIFEST_DIR"/*.yaml; do
+            [[ "$(basename "$manifest")" == "00-model-config.yaml" ]] && continue
+            oc_apply -n "$NS" -f "$manifest"
+        done
+        echo "Dry-run complete; no resources were changed."
+        exit 0
+    fi
+    for manifest in "$SIM_MANIFEST_DIR"/*.yaml; do
+        [[ "$(basename "$manifest")" == "00-model-config.yaml" ]] && continue
+        oc_apply -n "$NS" -f "$manifest"
+    done
+    for deployment in vllm-prefill vllm-decode vllm-decode-2; do
+        oc rollout status "deployment/$deployment" -n "$NS" --timeout=10m
+    done
+    oc wait --for=condition=Ready pod/test-client -n "$NS" --timeout=2m
+    echo "Simulator is ready. Run: SIM=1 ./toolkit/run.sh $CLUSTER_DIR preflight"
+    exit 0
+fi
 
 # ── ConfigMap ────────────────────────────────────────────────────────────
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -91,12 +186,12 @@ data:
 EOF
 
 # ── PVC (create only — can't resize after creation) ──────────────────────
-if ! oc get pvc model-cache -n "$NS" &>/dev/null; then
+if [[ "$DRY_RUN" == "client" ]] || ! oc get pvc model-cache -n "$NS" &>/dev/null; then
     SC_LINE=""
     if [ -n "${STORAGE_CLASS:-}" ]; then
         SC_LINE="  storageClassName: $STORAGE_CLASS"
     fi
-    oc apply -n "$NS" -f - <<EOF
+    oc_apply -n "$NS" -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -116,7 +211,7 @@ else
 fi
 
 # ── Prefill headless Service ──────────────────────────────────────────────
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -144,7 +239,7 @@ EOF
 # No sidecar on prefill (upstream pattern: prefill is direct vLLM only).
 # Clients hit prefill directly or are routed via x-prefiller-host-port header.
 echo "Creating prefill deployment (replicas=$PREFILL_REPLICAS)..."
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -216,11 +311,11 @@ spec:
           requests:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
+            $GPU_RESOURCE_NAME: "1"
           limits:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
+            $GPU_RESOURCE_NAME: "1"
         startupProbe:
           httpGet:
             path: /health
@@ -273,7 +368,7 @@ spec:
 EOF
 
 # ── Decode headless Service ───────────────────────────────────────────────
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -299,7 +394,7 @@ EOF
 
 # Decode direct: port 8001 (bypass sidecar — for exp1b latency decomposition)
 # Not in upstream — specific to our diagnostics toolkit.
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
@@ -326,7 +421,7 @@ EOF
 #   - If sidecar crashes, K8s restarts it without restarting the vLLM container
 #   - Pod startup is ordered: sidecar → vllm
 echo "Creating decode deployment (replicas=$DECODE_REPLICAS)..."
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -360,8 +455,10 @@ spec:
         image: $SIDECAR_IMAGE
         args:
         - "--port=8000"
-        - "--vllm-port=8001"
-        - "--connector=nixlv2"
+        - "--kv-connector=nixlv2"
+        - "--model-server-port=8001"
+        - "--secure-proxy=$SIDECAR_SECURE_PROXY"
+        - "--zap-log-level=1"
         restartPolicy: Always
         securityContext:
           capabilities:
@@ -434,11 +531,11 @@ spec:
           requests:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
+            $GPU_RESOURCE_NAME: "1"
           limits:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
+            $GPU_RESOURCE_NAME: "1"
         startupProbe:
           httpGet:
             path: /health
@@ -491,7 +588,7 @@ spec:
 EOF
 
 # ── PodDisruptionBudgets ─────────────────────────────────────────────────
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -505,7 +602,7 @@ spec:
       app: vllm-prefill
 EOF
 
-oc apply -n "$NS" -f - <<EOF
+oc_apply -n "$NS" -f - <<EOF
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -521,7 +618,7 @@ EOF
 
 # ── Test client pod ──────────────────────────────────────────────────────
 if [ "$MODE" != "sim" ]; then
-    oc apply -n "$NS" -f - <<EOF
+    oc_apply -n "$NS" -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -556,7 +653,7 @@ EOF
     # Best-effort: if user lacks RBAC permissions, pod discovery falls
     # back to env vars injected by run.sh at experiment time.
     echo "Creating RBAC for in-pod discovery..."
-    if ! oc apply -n "$NS" -f - <<EOF
+    if ! oc_apply -n "$NS" -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -591,31 +688,40 @@ fi
 # ── Clean up legacy resources ────────────────────────────────────────────
 echo ""
 
-# Remove old StatefulSets (replaced by Deployments)
-for old in vllm-prefill vllm-decode; do
-    if oc get statefulset "$old" -n "$NS" &>/dev/null; then
-        echo "Removing legacy StatefulSet: $old (replaced by Deployment)"
-        oc delete statefulset "$old" -n "$NS"
-    fi
-done
+if [[ -z "$DRY_RUN" ]]; then
+    # Remove legacy objects only when they belong to this deployment. This
+    # keeps a simulator deployment with overlapping names intact.
+    delete_legacy_if_owned() {
+        local kind="$1"
+        local name="$2"
+        local owner
+        owner=$(oc get "$kind" "$name" -n "$NS" \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null || true)
+        if [[ "$owner" == "vllm-disagg" ]]; then
+            echo "Removing legacy $kind: $name"
+            oc delete "$kind" "$name" -n "$NS"
+        elif [[ -n "$owner" ]]; then
+            echo "Keeping $kind/$name (owned by $owner)"
+        fi
+    }
 
-# Remove old per-instance Deployments from the per-instance era
-for old in vllm-prefill-1 vllm-prefill-2 \
-           vllm-decode-1 vllm-decode-2 vllm-decode-3; do
-    if oc get deployment "$old" -n "$NS" &>/dev/null; then
-        echo "Removing legacy per-instance Deployment: $old"
-        oc delete deployment "$old" -n "$NS"
-    fi
-done
+    # Remove old StatefulSets (replaced by Deployments)
+    for old in vllm-prefill vllm-decode; do
+        delete_legacy_if_owned statefulset "$old"
+    done
 
-# Remove per-instance services from the per-instance era
-for old in vllm-prefill-1-svc vllm-prefill-2-svc \
-           vllm-decode-1-svc vllm-decode-2-svc vllm-decode-3-svc; do
-    if oc get service "$old" -n "$NS" &>/dev/null; then
-        echo "Removing legacy Service: $old"
-        oc delete service "$old" -n "$NS"
-    fi
-done
+    # Remove old per-instance Deployments from the per-instance era
+    for old in vllm-prefill-1 vllm-prefill-2 \
+               vllm-decode-1 vllm-decode-2 vllm-decode-3; do
+        delete_legacy_if_owned deployment "$old"
+    done
+
+    # Remove per-instance services from the per-instance era
+    for old in vllm-prefill-1-svc vllm-prefill-2-svc \
+               vllm-decode-1-svc vllm-decode-2-svc vllm-decode-3-svc; do
+        delete_legacy_if_owned service "$old"
+    done
+fi
 
 echo ""
 echo "Topology: ${PREFILL_REPLICAS}P + ${DECODE_REPLICAS}D deployed."
@@ -632,6 +738,11 @@ echo "    vllm-decode-svc:8000         (decode via sidecar, headless)"
 echo "    vllm-decode-direct-svc:8001  (decode bypass sidecar, headless)"
 echo "    NIXL side channel:$NIXL_PORT (on all pods)"
 echo ""
+
+if [[ -n "$DRY_RUN" ]]; then
+    echo "Dry-run complete; no resources were changed."
+    exit 0
+fi
 echo "  Scale:"
 echo "    oc scale deployment vllm-prefill --replicas=N -n $NS"
 echo "    oc scale deployment vllm-decode  --replicas=N -n $NS"

@@ -18,14 +18,14 @@ by request latency, not by the oc API round-trip.
 Usage (from exp4_fault.py via oc exec):
     # Probe mode: send requests every 200ms, output JSONL
     oc exec test-client -- python3 fault_driver.py probe \\
-        --url https://vllm-decode-svc:8000/v1/completions \\
+        --url http://vllm-decode-svc:8000/v1/completions \\
         --prefill-host vllm-prefill-svc.ns.svc.cluster.local:8100 \\
         --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\
         --interval 0.2 --duration 120
 
     # Load mode: sustained 4 QPS with streaming, output CSV
     oc exec test-client -- python3 fault_driver.py load \\
-        --url https://vllm-decode-svc:8000/v1/completions \\
+        --url http://vllm-decode-svc:8000/v1/completions \\
         --prefill-host vllm-prefill-svc.ns.svc.cluster.local:8100 \\
         --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\
         --qps 4 --duration 60 --output /scripts/toolkit/data/load-results.csv

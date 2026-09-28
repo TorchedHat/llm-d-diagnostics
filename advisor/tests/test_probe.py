@@ -125,7 +125,7 @@ class TestDisaggProberConfig(unittest.TestCase):
 
     def test_default_urls(self):
         prober = DisaggProber("my-ns", "my-model")
-        self.assertEqual(prober.disagg_url, "https://vllm-decode-svc:8000/v1/completions")
+        self.assertEqual(prober.disagg_url, "http://vllm-decode-svc:8000/v1/completions")
         self.assertIn("my-ns", prober.prefill_host)
 
     def test_custom_urls(self):
