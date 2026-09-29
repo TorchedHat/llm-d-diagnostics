@@ -108,8 +108,10 @@ numbers don't reflect real inference.
 The GPU deployment defaults are pinned to the llm-d v0.9.0 compatibility
 matrix (vLLM v0.26.0 and router disaggregation sidecar v0.10.0). Override
 `VLLM_IMAGE` for the accelerator-specific vLLM image in your cluster. Set
-`GPU_RESOURCE_NAME` to the extended resource name exposed by its device
-plugin; the default is `nvidia.com/gpu`.
+`GPU_ALLOCATION_MODE=dra` on OpenShift DRA clusters; it requests the existing
+`gpu-<GPU_COUNT>` ResourceClaimTemplate for every vLLM pod. Use
+`GPU_ALLOCATION_MODE=classic` and `GPU_RESOURCE_NAME` on clusters with the
+classic NVIDIA device plugin.
 
 ## Profiling Tools
 

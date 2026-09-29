@@ -88,7 +88,9 @@ values — you don't need to edit the yaml. If deploying manually with
 |----------|---------|-------------|
 | `VLLM_IMAGE` | `vllm/vllm-openai:v0.26.0` | vLLM image (llm-d v0.9.0 compatibility baseline; override for your accelerator) |
 | `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0` | llm-d router disaggregation sidecar image |
-| `GPU_RESOURCE_NAME` | `nvidia.com/gpu` | Kubernetes extended resource requested for one accelerator |
+| `GPU_ALLOCATION_MODE` | `classic` | GPU request mechanism: `dra` or `classic` |
+| `GPU_COUNT` | `1` | GPUs requested per vLLM pod; used for vLLM tensor parallelism |
+| `GPU_RESOURCE_NAME` | `nvidia.com/gpu` | Classic device-plugin resource name; ignored in DRA mode |
 | `SIDECAR_SCHEME` | `http` | Sidecar listener and toolkit URL scheme (`http` or `https`) |
 | `MODEL_CACHE_SIZE` | `50Gi` | PVC size for model weights cache |
 | `STORAGE_CLASS` | (cluster default) | Kubernetes StorageClass for model-cache PVC |
@@ -99,6 +101,13 @@ values — you don't need to edit the yaml. If deploying manually with
 `STORAGE_CLASS` must support `ReadWriteMany` if pods are spread across
 nodes (anti-affinity). On OpenShift OCS, use `ocs-storagecluster-cephfs`.
 If unset, the cluster's default StorageClass is used.
+
+In DRA mode, each vLLM pod references the namespaced `ResourceClaimTemplate`
+named `gpu-${GPU_COUNT}` and attaches the resulting claim to its vLLM
+container. The template must exist before deployment. For example,
+`GPU_COUNT=2` uses `resourceClaimTemplateName: gpu-2` and sets vLLM tensor
+parallelism to 2. Classic mode requests `GPU_COUNT` units of
+`GPU_RESOURCE_NAME` instead.
 
 ## Cluster config file
 

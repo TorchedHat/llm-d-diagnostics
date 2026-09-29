@@ -8,6 +8,8 @@
 #
 # Reads cluster config from <cluster-dir>/env.sh. Topology is controlled by:
 #   PREFILL_REPLICAS=2 DECODE_REPLICAS=3 → 2P+3D (5 GPUs)
+# GPU allocation is selected with GPU_ALLOCATION_MODE=dra|classic. DRA claims
+# use the existing gpu-<GPU_COUNT> ResourceClaimTemplate in the namespace.
 #
 # Aligned with the llm-d v0.9.0 P/D manifests (modelserver/gpu/vllm):
 #   - Deployments (not StatefulSets)
@@ -66,6 +68,8 @@ DECODE_REPLICAS="${DECODE_REPLICAS:-2}"
 # llm-d router sidecar release.
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.26.0}"
 SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0}"
+GPU_ALLOCATION_MODE="${GPU_ALLOCATION_MODE:-classic}"
+GPU_COUNT="${GPU_COUNT:-1}"
 GPU_RESOURCE_NAME="${GPU_RESOURCE_NAME:-nvidia.com/gpu}"
 SIDECAR_SCHEME="${SIDECAR_SCHEME:-http}"
 MODEL_CACHE_SIZE="${MODEL_CACHE_SIZE:-50Gi}"
@@ -73,7 +77,7 @@ MODEL_CACHE_SIZE="${MODEL_CACHE_SIZE:-50Gi}"
 # NIXL side channel port (upstream default: 5557)
 NIXL_PORT="${NIXL_PORT:-5557}"
 
-for var in PREFILL_REPLICAS DECODE_REPLICAS NIXL_PORT; do
+for var in PREFILL_REPLICAS DECODE_REPLICAS NIXL_PORT GPU_COUNT; do
     val="${!var}"
     if ! [[ "$val" =~ ^[1-9][0-9]*$ ]]; then
         echo "ERROR: $var must be an integer (got '$val')"
@@ -94,10 +98,33 @@ for var in VLLM_IMAGE SIDECAR_IMAGE; do
     fi
 done
 
-if ! [[ "$GPU_RESOURCE_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9./_-]*$ ]]; then
-    echo "ERROR: Invalid GPU_RESOURCE_NAME: $GPU_RESOURCE_NAME"
-    exit 1
-fi
+case "$GPU_ALLOCATION_MODE" in
+    dra)
+        GPU_CLAIM_TEMPLATE="gpu-${GPU_COUNT}"
+        GPU_POD_RESOURCE_CLAIMS="      resourceClaims:
+      - name: gpu
+        resourceClaimTemplateName: ${GPU_CLAIM_TEMPLATE}"
+        GPU_CONTAINER_RESOURCE_CLAIMS="          claims:
+          - name: gpu"
+        GPU_RESOURCE_REQUEST=""
+        GPU_RESOURCE_LIMIT=""
+        ;;
+    classic)
+        if ! [[ "$GPU_RESOURCE_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9./_-]*$ ]]; then
+            echo "ERROR: Invalid GPU_RESOURCE_NAME: $GPU_RESOURCE_NAME"
+            exit 1
+        fi
+        GPU_CLAIM_TEMPLATE=""
+        GPU_POD_RESOURCE_CLAIMS=""
+        GPU_CONTAINER_RESOURCE_CLAIMS=""
+        GPU_RESOURCE_REQUEST="            ${GPU_RESOURCE_NAME}: \"${GPU_COUNT}\""
+        GPU_RESOURCE_LIMIT="            ${GPU_RESOURCE_NAME}: \"${GPU_COUNT}\""
+        ;;
+    *)
+        echo "ERROR: GPU_ALLOCATION_MODE must be 'dra' or 'classic' (got '$GPU_ALLOCATION_MODE')"
+        exit 2
+        ;;
+esac
 if [[ "$SIDECAR_SCHEME" != "http" && "$SIDECAR_SCHEME" != "https" ]]; then
     echo "ERROR: SIDECAR_SCHEME must be 'http' or 'https'"
     exit 1
@@ -119,7 +146,11 @@ echo "Model:       $MODEL"
 echo "Topology:    ${PREFILL_REPLICAS}P + ${DECODE_REPLICAS}D"
 echo "vLLM image:  $VLLM_IMAGE"
 echo "Sidecar:     $SIDECAR_IMAGE"
-echo "GPU resource: $GPU_RESOURCE_NAME"
+if [[ "$GPU_ALLOCATION_MODE" == "dra" ]]; then
+    echo "GPU allocation: DRA ($GPU_CLAIM_TEMPLATE, ${GPU_COUNT} GPU(s) per vLLM pod)"
+else
+    echo "GPU allocation: classic ($GPU_RESOURCE_NAME, ${GPU_COUNT} GPU(s) per vLLM pod)"
+fi
 echo "Sidecar URL:  $SIDECAR_SCHEME"
 echo "PVC size:    $MODEL_CACHE_SIZE"
 echo ""
@@ -134,6 +165,14 @@ elif ! oc get namespace "$NS" &>/dev/null; then
         exit 1
     fi
     oc create namespace "$NS"
+fi
+
+if [[ "$MODE" != "sim" && "$GPU_ALLOCATION_MODE" == "dra" && "$DRY_RUN" != "client" ]]; then
+    if ! oc get resourceclaimtemplate "$GPU_CLAIM_TEMPLATE" -n "$NS" &>/dev/null; then
+        echo "ERROR: DRA ResourceClaimTemplate '$GPU_CLAIM_TEMPLATE' not found in namespace '$NS'."
+        echo "Create the matching gpu-<GPU_COUNT> template before deploying."
+        exit 1
+    fi
 fi
 
 # Simulation mode must deploy the simulator manifests rather than the GPU
@@ -265,6 +304,7 @@ spec:
         llm-d.ai/role: prefill
         app.kubernetes.io/part-of: vllm-disagg
     spec:
+${GPU_POD_RESOURCE_CLAIMS}
       containers:
       - name: vllm
         image: $VLLM_IMAGE
@@ -283,6 +323,8 @@ spec:
         - \$(GPU_MEMORY_UTILIZATION)
         - --max-model-len
         - \$(MAX_MODEL_LEN)
+        - --tensor-parallel-size
+        - "$GPU_COUNT"
         - --trust-remote-code
         - --kv-transfer-config
         - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
@@ -311,11 +353,12 @@ spec:
           requests:
             cpu: "4"
             memory: 16Gi
-            $GPU_RESOURCE_NAME: "1"
-          limits:
+${GPU_RESOURCE_REQUEST:+$GPU_RESOURCE_REQUEST
+}          limits:
             cpu: "4"
             memory: 16Gi
-            $GPU_RESOURCE_NAME: "1"
+${GPU_RESOURCE_LIMIT:+$GPU_RESOURCE_LIMIT
+}${GPU_CONTAINER_RESOURCE_CLAIMS}
         startupProbe:
           httpGet:
             path: /health
@@ -447,6 +490,7 @@ spec:
         llm-d.ai/role: decode
         app.kubernetes.io/part-of: vllm-disagg
     spec:
+${GPU_POD_RESOURCE_CLAIMS}
       initContainers:
       # Native sidecar (restartPolicy: Always, K8s 1.29+/OCP 4.17+).
       # Proxies requests: client → sidecar:8000 → vllm:8001
@@ -503,6 +547,8 @@ spec:
         - \$(GPU_MEMORY_UTILIZATION)
         - --max-model-len
         - \$(MAX_MODEL_LEN)
+        - --tensor-parallel-size
+        - "$GPU_COUNT"
         - --trust-remote-code
         - --kv-transfer-config
         - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
@@ -531,11 +577,12 @@ spec:
           requests:
             cpu: "4"
             memory: 16Gi
-            $GPU_RESOURCE_NAME: "1"
-          limits:
+${GPU_RESOURCE_REQUEST:+$GPU_RESOURCE_REQUEST
+}          limits:
             cpu: "4"
             memory: 16Gi
-            $GPU_RESOURCE_NAME: "1"
+${GPU_RESOURCE_LIMIT:+$GPU_RESOURCE_LIMIT
+}${GPU_CONTAINER_RESOURCE_CLAIMS}
         startupProbe:
           httpGet:
             path: /health
