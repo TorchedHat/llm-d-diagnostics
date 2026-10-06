@@ -11,9 +11,9 @@
 # GPU allocation is selected with GPU_ALLOCATION_MODE=dra|classic. DRA claims
 # use the existing gpu-<GPU_COUNT> ResourceClaimTemplate in the namespace.
 #
-# Aligned with the llm-d v0.9.0 P/D manifests (modelserver/gpu/vllm):
+# Follows the llm-d v0.10.0 P/D deployment conventions:
 #   - Deployments (not StatefulSets)
-#   - kv_role: kv_both (bidirectional KV, both stages can prefill or decode)
+#   - explicit NIXL roles: kv_producer on prefill, kv_consumer on decode
 #   - Native sidecar (initContainer with restartPolicy: Always, K8s 1.29+)
 #   - NIXL side channel on all pods (VLLM_NIXL_SIDE_CHANNEL_HOST/PORT)
 #   - llm-d.ai/role labels for ecosystem compatibility
@@ -63,11 +63,11 @@ source "$CLUSTER_DIR/env.sh"
 PREFILL_REPLICAS="${PREFILL_REPLICAS:-1}"
 DECODE_REPLICAS="${DECODE_REPLICAS:-2}"
 
-# Images pinned to the llm-d v0.9.0 release matrix. Override in env.sh to
-# select another vLLM build for the target accelerator or a newer compatible
-# llm-d router sidecar release.
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.26.0}"
-SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0}"
+# Latest upstream vLLM release (CUDA 13.0 build) with llm-d Router v0.11.0.
+# The llm-d v0.10.0 release matrix lists vLLM v0.30.0; override in env.sh to
+# reproduce that matrix or select an image for the target accelerator.
+VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.31.0}"
+SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.11.0}"
 GPU_ALLOCATION_MODE="${GPU_ALLOCATION_MODE:-classic}"
 GPU_COUNT="${GPU_COUNT:-1}"
 GPU_RESOURCE_NAME="${GPU_RESOURCE_NAME:-nvidia.com/gpu}"
@@ -327,7 +327,7 @@ ${GPU_POD_RESOURCE_CLAIMS}
         - "$GPU_COUNT"
         - --trust-remote-code
         - --kv-transfer-config
-        - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
         env:
         - name: HF_HOME
           value: /model-cache/hf-cache
@@ -551,7 +551,7 @@ ${GPU_POD_RESOURCE_CLAIMS}
         - "$GPU_COUNT"
         - --trust-remote-code
         - --kv-transfer-config
-        - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
         env:
         - name: HF_HOME
           value: /model-cache/hf-cache
@@ -801,10 +801,14 @@ ELAPSED=0
 EXPECTED=$((PREFILL_REPLICAS + DECODE_REPLICAS))
 
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    READY=$(oc get pods -n "$NS" \
-        -l app.kubernetes.io/part-of=vllm-disagg,app!=test-client \
-        -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
-        2>/dev/null | grep -c "True" | tr -d '\n' || echo 0)
+    READY=0
+    for deployment in vllm-prefill vllm-decode; do
+        replicas="$(oc get deployment "$deployment" -n "$NS" -o jsonpath='{.spec.replicas}')"
+        # Old Ready pods can mask a failing new ReplicaSet during an image rollout.
+        if oc rollout status "deployment/$deployment" -n "$NS" --timeout=1s >/dev/null 2>&1; then
+            READY=$((READY + replicas))
+        fi
+    done
     if [ "$READY" -ge "$EXPECTED" ]; then
         echo ""
         echo "All $EXPECTED vLLM pods ready."

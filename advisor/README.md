@@ -52,7 +52,7 @@ python3 advisor/diagnose.py --namespace prod
   [CRIT] vLLM image version mismatch across pods
   Evidence: Different images: vllm-prefill: v0.18.1, vllm-decode: v0.17.0
   Cause:    Mismatched vLLM/NIXL versions cause handshake failures (ai-dynamo#6671)
-  Fix:      oc set image deployment/vllm-decode vllm=vllm/vllm-openai:v0.18.1 -n prod
+  Fix:      oc set image deployment/vllm-decode vllm=vllm/vllm-openai:v0.31.0 -n prod
             (auto-fixable: copy-paste the command above)
 
   [CRIT] NIXL transfer failures detected on vllm-decode-0

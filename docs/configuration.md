@@ -86,8 +86,8 @@ values — you don't need to edit the yaml. If deploying manually with
 
 | Variable | Default | What it does |
 |----------|---------|-------------|
-| `VLLM_IMAGE` | `vllm/vllm-openai:v0.26.0` | vLLM image (llm-d v0.9.0 compatibility baseline; override for your accelerator) |
-| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0` | llm-d router disaggregation sidecar image |
+| `VLLM_IMAGE` | `vllm/vllm-openai:v0.31.0` | Latest upstream vLLM release, CUDA 13.0 build; override for your accelerator. llm-d v0.10.0's release matrix lists v0.30.0. |
+| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.11.0` | llm-d Router disaggregation sidecar image |
 | `GPU_ALLOCATION_MODE` | `classic` | GPU request mechanism: `dra` or `classic` |
 | `GPU_COUNT` | `1` | GPUs requested per vLLM pod; used for vLLM tensor parallelism |
 | `GPU_RESOURCE_NAME` | `nvidia.com/gpu` | Classic device-plugin resource name; ignored in DRA mode |

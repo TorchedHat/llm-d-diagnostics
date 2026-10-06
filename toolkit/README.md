@@ -144,8 +144,8 @@ export DATA_DIR="clusters/my-cluster/data"
 export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8100"
 
 # For deploy.sh only:
-export VLLM_IMAGE="vllm/vllm-openai:v0.26.0"
-export SIDECAR_IMAGE="ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0"
+export VLLM_IMAGE="vllm/vllm-openai:v0.31.0"
+export SIDECAR_IMAGE="ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.11.0"
 export GPU_ALLOCATION_MODE="dra"
 export GPU_COUNT=1
 # Use GPU_ALLOCATION_MODE=classic and GPU_RESOURCE_NAME for classic NVIDIA clusters.
