@@ -11,8 +11,8 @@ to a specific cluster.
 | `MODEL` | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | Model name for API requests |
 | `SIM` | (unset) | Set to `1` for inference-sim mode (HTTP, no TLS) |
 | `BASELINE_URL` | `http://vllm-prefill-svc:8100/v1/completions` | Prefill direct endpoint |
-| `DISAGG_D1_URL` | `https://vllm-decode-svc:8000/v1/completions` | Decode-1 through sidecar |
-| `DISAGG_D2_URL` | `https://vllm-decode-2-svc:8000/v1/completions` | Decode-2 through sidecar |
+| `DISAGG_D1_URL` | `http://vllm-decode-svc:8000/v1/completions` | Decode-1 through sidecar (scheme follows `SIDECAR_SCHEME`) |
+| `DISAGG_D2_URL` | `http://vllm-decode-2-svc:8000/v1/completions` | Decode-2 through sidecar (scheme follows `SIDECAR_SCHEME`) |
 | `RUNS` | `20` | Measured runs per config |
 | `WARMUP` | `3` | Warmup requests (discarded) |
 | `MAX_TOKENS` | `20` | Max completion tokens |
@@ -86,8 +86,12 @@ values — you don't need to edit the yaml. If deploying manually with
 
 | Variable | Default | What it does |
 |----------|---------|-------------|
-| `VLLM_IMAGE` | `vllm/vllm-openai:v0.18.1` | vLLM container image |
-| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-routing-sidecar:v0.6.1` | Routing sidecar image |
+| `VLLM_IMAGE` | `vllm/vllm-openai:v0.31.0` | Latest upstream vLLM release, CUDA 13.0 build; override for your accelerator. llm-d v0.10.0's release matrix lists v0.30.0. |
+| `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.11.0` | llm-d Router disaggregation sidecar image |
+| `GPU_ALLOCATION_MODE` | `classic` | GPU request mechanism: `dra` or `classic` |
+| `GPU_COUNT` | `1` | GPUs requested per vLLM pod; used for vLLM tensor parallelism |
+| `GPU_RESOURCE_NAME` | `nvidia.com/gpu` | Classic device-plugin resource name; ignored in DRA mode |
+| `SIDECAR_SCHEME` | `http` | Sidecar listener and toolkit URL scheme (`http` or `https`) |
 | `MODEL_CACHE_SIZE` | `50Gi` | PVC size for model weights cache |
 | `STORAGE_CLASS` | (cluster default) | Kubernetes StorageClass for model-cache PVC |
 | `MAX_MODEL_LEN` | `2048` | Maximum sequence length |
@@ -97,6 +101,13 @@ values — you don't need to edit the yaml. If deploying manually with
 `STORAGE_CLASS` must support `ReadWriteMany` if pods are spread across
 nodes (anti-affinity). On OpenShift OCS, use `ocs-storagecluster-cephfs`.
 If unset, the cluster's default StorageClass is used.
+
+In DRA mode, each vLLM pod references the namespaced `ResourceClaimTemplate`
+named `gpu-${GPU_COUNT}` and attaches the resulting claim to its vLLM
+container. The template must exist before deployment. For example,
+`GPU_COUNT=2` uses `resourceClaimTemplateName: gpu-2` and sets vLLM tensor
+parallelism to 2. Classic mode requests `GPU_COUNT` units of
+`GPU_RESOURCE_NAME` instead.
 
 ## Cluster config file
 
@@ -119,9 +130,9 @@ automatically.
 This toolkit is designed for **cluster diagnostics by trusted
 operators**. A few things to be aware of:
 
-- **TLS verification is disabled** in client.py (`ssl.CERT_NONE`). The
-  llm-d routing sidecar generates self-signed certificates at startup —
-  there is no CA to verify against. This is inherent to the sidecar design.
+- The deployment defaults to HTTP inside the cluster. Set `SIDECAR_SCHEME=https`
+  to enable the sidecar's self-signed TLS listener; toolkit clients disable
+  certificate verification for that endpoint (`ssl.CERT_NONE`).
 - **Containers run as root** because vLLM requires it for CUDA and NIXL
   memory registration. OpenShift SCCs enforce additional restrictions at
   the cluster level.

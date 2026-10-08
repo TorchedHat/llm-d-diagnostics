@@ -17,6 +17,10 @@ cp examples/env.sh.example clusters/my-cluster/env.sh
 # Edit env.sh with your namespace, model, images
 
 # 2. Deploy
+# Optional: validate/render resources without writing to the cluster
+DRY_RUN=client ./scripts/deploy.sh clusters/my-cluster
+# Or, against an existing namespace, ask the API server to validate them:
+DRY_RUN=server ./scripts/deploy.sh clusters/my-cluster
 ./scripts/deploy.sh clusters/my-cluster
 
 # 3. Run all non-destructive experiments
@@ -100,6 +104,15 @@ SIM=1 ./toolkit/run.sh clusters/my-sim latency
 Sim mode exercises the sidecar routing and measurement pipeline with
 canned responses. No real model, no KV cache, no NIXL transfer — the
 numbers don't reflect real inference.
+
+The GPU deployment defaults use upstream vLLM `v0.31.0` with the llm-d
+Router disaggregation sidecar `v0.11.0`. The llm-d v0.10.0 release matrix
+lists vLLM `v0.30.0`; use that image when reproducing that exact matrix.
+Override `VLLM_IMAGE` for an accelerator-specific image in your cluster. Set
+`GPU_ALLOCATION_MODE=dra` on OpenShift DRA clusters; it requests the existing
+`gpu-<GPU_COUNT>` ResourceClaimTemplate for every vLLM pod. Use
+`GPU_ALLOCATION_MODE=classic` and `GPU_RESOURCE_NAME` on clusters with the
+classic NVIDIA device plugin.
 
 ## Profiling Tools
 

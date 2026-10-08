@@ -13,6 +13,7 @@
 export NS=my-namespace
 export MODEL="sim-model"
 export SIM=1
+export SIDECAR_SCHEME="http"
 export DATA_DIR="clusters/my-sim/data"
 
 # In-cluster prefill service URL

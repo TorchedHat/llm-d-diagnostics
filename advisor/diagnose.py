@@ -9,6 +9,7 @@ Part of the llm-d-diagnostics advisory layer.
 """
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 
@@ -344,7 +345,8 @@ def _check_transfer_duration(pods, ns="default", model: str = "",
 
 def _check_probe_health(ns, model, decode_url="", prefill_host="") -> list[Issue]:
     """Send a test disagg request to verify end-to-end pipeline."""
-    url = decode_url or "https://vllm-decode-svc:8000/v1/completions"
+    scheme = os.environ.get("SIDECAR_SCHEME", "http")
+    url = decode_url or f"{scheme}://vllm-decode-svc:8000/v1/completions"
     host = prefill_host or f"vllm-prefill-svc.{ns}.svc.cluster.local:8100"
     headers = {"x-prefiller-host-port": host}
     r = _send_probe(url, model, extra_headers=headers)

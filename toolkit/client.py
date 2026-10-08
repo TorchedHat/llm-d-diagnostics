@@ -8,7 +8,8 @@ All configuration via environment variables:
     MODEL           Model name (default: TinyLlama/TinyLlama-1.1B-Chat-v1.0)
     NS              Kubernetes namespace (default: default)
     BASELINE_URL    Prefill direct URL (default: http://vllm-prefill-svc:8100/v1/completions)
-    DISAGG_URL      Decode via sidecar (default: https://vllm-decode-svc:8000/v1/completions)
+    SIDECAR_SCHEME  Sidecar listener scheme (default: http)
+    DISAGG_URL      Decode via sidecar (default: http://vllm-decode-svc:8000/v1/completions)
     DECODE_DIRECT_URL  Decode bypass sidecar (default: http://vllm-decode-direct-svc:8001/v1/completions)
 
 Per-pod URLs (by pod IP):
@@ -22,10 +23,9 @@ Per-pod URLs (by pod IP):
     RUNS            Measured runs per config (default: 20)
     MAX_TOKENS      Max completion tokens (default: 20)
 
-Sim mode (SIM=1):
+Simulation mode (SIM=1):
     Uses inference-sim (llm-d-inference-sim) as a GPU-free test target.
-    Switches decode URLs to HTTP (sidecar runs --secure-proxy=false).
-    Deploy with: oc apply -f manifests/sim/
+    Uses HTTP by default. Deploy with: ./scripts/deploy.sh <cluster-dir> sim
 """
 
 import http.client
@@ -46,18 +46,19 @@ def env(name, default):
 
 SIM = env("SIM", "") == "1"
 NS = env("NS", "default")
+SIDECAR_SCHEME = env("SIDECAR_SCHEME", "http")
+if SIDECAR_SCHEME not in {"http", "https"}:
+    raise ValueError("SIDECAR_SCHEME must be 'http' or 'https'")
 
 if SIM:
     MODEL = env("MODEL", env("MODEL_NAME", "sim-model"))
-    _DECODE_SCHEME = "http"
     _DECODE_PORT = 8000
 else:
     MODEL = env("MODEL", env("MODEL_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"))
-    _DECODE_SCHEME = "https"
     _DECODE_PORT = 8000
 
 BASELINE_URL = env("BASELINE_URL", "http://vllm-prefill-svc:8100/v1/completions")
-DISAGG_URL = env("DISAGG_URL", f"{_DECODE_SCHEME}://vllm-decode-svc:{_DECODE_PORT}/v1/completions")
+DISAGG_URL = env("DISAGG_URL", f"{SIDECAR_SCHEME}://vllm-decode-svc:{_DECODE_PORT}/v1/completions")
 DECODE_DIRECT_URL = env("DECODE_DIRECT_URL", "http://vllm-decode-direct-svc:8001/v1/completions")
 
 # Per-pod URL construction by IP (for experiments that need per-pod targeting).
@@ -65,7 +66,7 @@ DECODE_DIRECT_URL = env("DECODE_DIRECT_URL", "http://vllm-decode-direct-svc:8001
 
 def decode_pod_url_by_ip(ip):
     """URL for a specific decode pod by IP (via sidecar, port 8000)."""
-    return f"{_DECODE_SCHEME}://{ip}:{_DECODE_PORT}/v1/completions"
+    return f"{SIDECAR_SCHEME}://{ip}:{_DECODE_PORT}/v1/completions"
 
 def decode_direct_url_by_ip(ip):
     """URL for a specific decode pod by IP (bypass sidecar, port 8001)."""

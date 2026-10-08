@@ -72,6 +72,12 @@ if [ ! -f "$CLUSTER_DIR/env.sh" ]; then
 fi
 
 source "$CLUSTER_DIR/env.sh"
+SIDECAR_SCHEME="${SIDECAR_SCHEME:-http}"
+if [[ "$SIDECAR_SCHEME" != "http" && "$SIDECAR_SCHEME" != "https" ]]; then
+    echo "ERROR: SIDECAR_SCHEME must be 'http' or 'https'"
+    exit 1
+fi
+export SIDECAR_SCHEME
 mkdir -p "$DATA_DIR"
 
 POD=test-client
@@ -96,11 +102,11 @@ preflight() {
     oc cp "$SCRIPT_DIR/" "$NS/$POD:$(dirname $REMOTE_DIR)/"
 
     # 3. Verify each endpoint with a single request
-    local env_vars="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST"
+    local env_vars="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME"
     [ -n "${SIM:-}" ] && env_vars="$env_vars SIM=$SIM"
 
     for endpoint in "baseline:http://vllm-prefill-svc:8100" \
-                    "decode:https://vllm-decode-svc:8000"; do
+                    "decode:${SIDECAR_SCHEME}://vllm-decode-svc:8000"; do
         local name="${endpoint%%:*}"
         local url="${endpoint#*:}/v1/completions"
 
@@ -147,7 +153,7 @@ DECODE_IPS=$(oc get pods -l app=vllm-decode -n "$NS" \
     -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{":"}{.status.podIP}{","}{end}' \
     2>/dev/null | sed 's/,$//')
 
-REMOTE_ENV="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST"
+REMOTE_ENV="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME"
 [ -n "$PREFILL_IPS" ] && REMOTE_ENV="$REMOTE_ENV PODS_VLLM_PREFILL=$PREFILL_IPS"
 [ -n "$DECODE_IPS" ] && REMOTE_ENV="$REMOTE_ENV PODS_VLLM_DECODE=$DECODE_IPS"
 [ -n "${SIM:-}" ] && REMOTE_ENV="$REMOTE_ENV SIM=$SIM"

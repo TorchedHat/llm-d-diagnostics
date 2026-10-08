@@ -16,16 +16,17 @@ spec:
       labels:
         app: vllm-test
     spec:
+      resourceClaims:
+      - name: gpu
+        resourceClaimTemplateName: gpu-1
       containers:
       - name: vllm
-        image: vllm/vllm-openai:v0.18.1
+        image: vllm/vllm-openai:v0.31.0
         command:
-        - python3
-        - -m
-        - vllm.entrypoints.openai.api_server
-        args:
-        - --model
+        - vllm
+        - serve
         - $(MODEL_NAME)
+        args:
         - --host
         - "0.0.0.0"
         - --port
@@ -36,6 +37,8 @@ spec:
         - $(GPU_MEMORY_UTILIZATION)
         - --max-model-len
         - $(MAX_MODEL_LEN)
+        - --tensor-parallel-size
+        - "1"
         - --trust-remote-code
         env:
         - name: HF_HOME
@@ -51,11 +54,11 @@ spec:
           requests:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
           limits:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
+          claims:
+          - name: gpu
         readinessProbe:
           httpGet:
             path: /health

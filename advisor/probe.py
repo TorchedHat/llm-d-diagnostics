@@ -8,6 +8,7 @@ against a rolling baseline for anomaly detection.
 
 import http.client
 import json
+import os
 import ssl
 import statistics
 import time
@@ -101,7 +102,8 @@ class DisaggProber:
         self.window_size = window_size
         self._baseline_window: deque[float] = deque(maxlen=window_size)
         self._baseline_ms: float = 0.0
-        self.disagg_url = decode_url or "https://vllm-decode-svc:8000/v1/completions"
+        scheme = os.environ.get("SIDECAR_SCHEME", "http")
+        self.disagg_url = decode_url or f"{scheme}://vllm-decode-svc:8000/v1/completions"
         self.prefill_host = prefill_host or f"vllm-prefill-svc.{namespace}.svc.cluster.local:8100"
 
     def probe(self) -> ProbeResult:

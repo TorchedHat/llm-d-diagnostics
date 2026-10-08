@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-model-config
+  labels:
+    app.kubernetes.io/part-of: vllm-disagg-sim
+data:
+  MODEL_NAME: "sim-model"

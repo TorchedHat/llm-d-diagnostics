@@ -15,6 +15,6 @@ spec:
     targetPort: 8100
     protocol: TCP
   - name: nixl
-    port: 5600
-    targetPort: 5600
+    port: 5557
+    targetPort: 5557
     protocol: TCP

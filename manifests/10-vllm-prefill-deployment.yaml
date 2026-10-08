@@ -18,16 +18,17 @@ spec:
         app: vllm-prefill
         app.kubernetes.io/part-of: vllm-disagg
     spec:
+      resourceClaims:
+      - name: gpu
+        resourceClaimTemplateName: gpu-1
       containers:
       - name: vllm
-        image: vllm/vllm-openai:v0.18.1
+        image: vllm/vllm-openai:v0.31.0
         command:
-        - python3
-        - -m
-        - vllm.entrypoints.openai.api_server
-        args:
-        - --model
+        - vllm
+        - serve
         - $(MODEL_NAME)
+        args:
         - --host
         - "0.0.0.0"
         - --port
@@ -38,6 +39,8 @@ spec:
         - $(GPU_MEMORY_UTILIZATION)
         - --max-model-len
         - $(MAX_MODEL_LEN)
+        - --tensor-parallel-size
+        - "1"
         - --trust-remote-code
         - --kv-transfer-config
         - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
@@ -48,6 +51,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+          value: "5557"
         envFrom:
         - configMapRef:
             name: vllm-model-config
@@ -55,18 +60,18 @@ spec:
         - containerPort: 8100
           name: http
           protocol: TCP
-        - containerPort: 5600
+        - containerPort: 5557
           name: nixl
           protocol: TCP
         resources:
           requests:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
           limits:
             cpu: "4"
             memory: 16Gi
-            nvidia.com/gpu: "1"
+          claims:
+          - name: gpu
         startupProbe:
           httpGet:
             path: /health
