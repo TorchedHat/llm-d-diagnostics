@@ -181,7 +181,8 @@ def main():
                 overrides[env_key] = str(entry[json_key])
 
         ns_val = base_env.get("NS", "llm-d")
-        overrides["PREFILL_HOST"] = f"vllm-prefill-svc.{ns_val}.svc.cluster.local:8100"
+        prefill_port = 8100 if base_env.get("SIM") == "1" else 8000
+        overrides["PREFILL_HOST"] = f"vllm-prefill-svc.{ns_val}.svc.cluster.local:{prefill_port}"
 
         env_path = os.path.join(cluster_dir, "env.sh")
         write_env_sh(env_path, base_env, overrides)

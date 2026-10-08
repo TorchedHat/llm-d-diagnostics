@@ -41,10 +41,11 @@ Before any experiment run:
 - [ ] All pods Running and Ready (`oc get pods -n $NS`)
 - [ ] Pod restart counts recorded (they affect warmup state)
 - [ ] Verify each request path with a single test request:
-  - A: prefill-direct (port 8100, HTTP)
+  - A: prefill headless Service (pod port 8000, HTTP; SIM uses 8100)
   - B: decode-direct (port 8001, HTTP)
-  - C: sidecar-only (port 8000, HTTPS)
-  - D: disaggregated (port 8000, HTTPS, routed through prefill)
+  - C: sidecar-only (port 8000; scheme follows `SIDECAR_SCHEME`)
+  - D: disaggregated (sidecar port 8000; scheme follows `SIDECAR_SCHEME`, routed through prefill pod port 8000)
+  - E: EPP Gateway route (when configured; record its URL and scheduler metrics)
 - [ ] Record `oc get pods -o wide` (node placement, IPs, ages)
 - [ ] Note time and any known cluster activity
 

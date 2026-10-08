@@ -31,4 +31,4 @@ export DECODE_REPLICAS=2
 
 # In-cluster URLs are the defaults in client.py — no overrides needed.
 # Experiments run inside the test-client pod via `oc exec`.
-export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8100"
+export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8000"

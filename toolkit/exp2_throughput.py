@@ -29,11 +29,13 @@ from client import (
     DATA_DIR,
     DISAGG_D1_URL,
     DISAGG_D2_URL,
+    EPP_URL,
     PREFILL_HOST,
     WARMUP,
     build_prompt,
     dot,
     env,
+    epp_enabled,
     print_config,
     progress,
     send_request,
@@ -76,6 +78,8 @@ def main():
         progress(f"--- Concurrency: {concurrency} ---")
 
         config_order = [ConfigThroughput.BASELINE, ConfigThroughput.DISAGG_1D, ConfigThroughput.DISAGG_2D]
+        if epp_enabled():
+            config_order.append(ConfigThroughput.DISAGG_EPP)
         random.shuffle(config_order)
         for config_name in config_order:
             progress(f"  {config_name}: ", end="")
@@ -87,6 +91,8 @@ def main():
                 elif config_name == ConfigThroughput.DISAGG_2D and i % 2 == 1:
                     send_request(DISAGG_D2_URL, PROMPT, MAX_TOKENS,
                                  extra_headers=DISAGG_HEADERS)
+                elif config_name == ConfigThroughput.DISAGG_EPP:
+                    send_request(EPP_URL, PROMPT, MAX_TOKENS)
                 else:
                     send_request(DISAGG_D1_URL, PROMPT, MAX_TOKENS,
                                  extra_headers=DISAGG_HEADERS)
@@ -108,6 +114,8 @@ def main():
                         elif config_name == ConfigThroughput.DISAGG_1D:
                             f = pool.submit(send_one, DISAGG_D1_URL,
                                             DISAGG_HEADERS, "d1")
+                        elif config_name == ConfigThroughput.DISAGG_EPP:
+                            f = pool.submit(send_one, EPP_URL, None, "epp")
                         else:  # DISAGG-2D: round-robin
                             if run % 2 == 1:
                                 f = pool.submit(send_one, DISAGG_D1_URL,

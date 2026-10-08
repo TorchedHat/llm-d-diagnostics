@@ -54,11 +54,13 @@ from client import (
     DATA_DIR,
     DISAGG_D1_URL,
     DISAGG_D2_URL,
+    EPP_URL,
     PREFILL_HOST,
     WARMUP,
     build_prompt,
     dot,
     env,
+    epp_enabled,
     print_config,
     progress,
     send_request,
@@ -156,10 +158,14 @@ def run_config(config_name, writer, gpu_writer):
     def pick_url(seq):
         if config_name == ConfigMixed.BASELINE:
             return BASELINE_URL
+        if config_name == ConfigMixed.DISAGG_EPP:
+            return EPP_URL
         return DISAGG_D1_URL if seq % 2 == 1 else DISAGG_D2_URL
 
     def headers():
-        return None if config_name == ConfigMixed.BASELINE else DISAGG_HEADERS
+        if config_name in {ConfigMixed.BASELINE, ConfigMixed.DISAGG_EPP}:
+            return None
+        return DISAGG_HEADERS
 
     # GPU utilization sampler (runs in background thread)
     gpu_stop = threading.Event()
@@ -330,6 +336,8 @@ def main():
         (ConfigMixed.BASELINE,  "monolithic vLLM"),
         (ConfigMixed.DISAGG_2D, "disaggregated, 2 decode replicas"),
     ]
+    if epp_enabled():
+        configs.append((ConfigMixed.DISAGG_EPP, "EPP Gateway, dynamic prefill/decode selection"))
 
     for config_name, desc in configs:
         progress(f"  Config: {config_name} ({desc})")

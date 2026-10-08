@@ -10,7 +10,7 @@ load, coordination overhead may grow, explaining throughput loss. This
 experiment isolates where the overhead lives.
 
 Configs (pinned to specific pods via PinnedConnection):
-    A. Baseline:        client -> prefill vLLM (8100)
+    A. Baseline:        client -> prefill vLLM (pod port 8000; SIM uses 8100)
     B. Direct decode:   client -> decode vLLM (8001), no sidecar
     C. Sidecar-only:    client -> sidecar (8000) -> decode vLLM (8001)
     D. Disaggregated:   client -> sidecar -> prefill -> NIXL -> decode
@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(__file__))
 from client import (
     DATA_DIR,
+    EPP_URL,
     PinnedConnection,
     build_prompt,
     decode_direct_url_by_ip,
@@ -49,6 +50,8 @@ from client import (
     discover_pod_ips,
     dot,
     env,
+    epp_enabled,
+    prefill_pod_host_port,
     prefill_pod_url_by_ip,
     print_config,
     progress,
@@ -111,8 +114,10 @@ def main():
               for _ in range(CONCURRENCY)]
     pool_d = [PinnedConnection(decode_pod_url_by_ip(decode_ip),
                                pod_name=decode_name,
-                               extra_headers={"x-prefiller-host-port": f"{prefill_ip}:8100"})
+                               extra_headers={"x-prefiller-host-port": prefill_pod_host_port(prefill_ip)})
               for _ in range(CONCURRENCY)]
+    pool_epp = ([PinnedConnection(EPP_URL, pod_name="epp-gateway")
+                 for _ in range(CONCURRENCY)] if epp_enabled() else [])
 
     CONFIGS = [
         (ConfigDecompose.A_PREFILL_DIRECT, pool_a, prefill_name),
@@ -120,6 +125,8 @@ def main():
         (ConfigDecompose.C_SIDECAR_ONLY,   pool_c, decode_name),
         (ConfigDecompose.D_DISAGGREGATED,  pool_d, decode_name),
     ]
+    if pool_epp:
+        CONFIGS.append((ConfigDecompose.E_EPP_GATEWAY, pool_epp, "epp-gateway"))
 
     progress("")
     progress(f"  Concurrency: {CONCURRENCY} (pool of {CONCURRENCY} connections per config)")

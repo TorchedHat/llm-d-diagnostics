@@ -42,6 +42,7 @@ class ConfigExp1(str, Enum):
     BASELINE = "BASELINE"
     DISAGG_D1 = "DISAGG-D1"
     DISAGG_D2 = "DISAGG-D2"
+    DISAGG_EPP = "DISAGG-EPP"
 
 # exp1b / exp5: decomposition and sequence-length sweep
 class ConfigDecompose(str, Enum):
@@ -49,18 +50,21 @@ class ConfigDecompose(str, Enum):
     B_DECODE_DIRECT = "B-decode-direct"
     C_SIDECAR_ONLY = "C-sidecar-only"
     D_DISAGGREGATED = "D-disaggregated"
+    E_EPP_GATEWAY = "E-EPP-gateway"
 
 # exp2 / exp6: throughput and saturation
 class ConfigThroughput(str, Enum):
     BASELINE = "BASELINE"
     DISAGG_1D = "DISAGG-1D"
     DISAGG_2D = "DISAGG-2D"
+    DISAGG_EPP = "DISAGG-EPP"
 
 # exp3 / exp7: isolation and mixed workload (same config space)
 class ConfigPaired(str, Enum):
     """BASELINE vs DISAGG-2D comparison. Used by exp3 (isolation) and exp7 (mixed)."""
     BASELINE = "BASELINE"
     DISAGG_2D = "DISAGG-2D"
+    DISAGG_EPP = "DISAGG-EPP"
 
 # Aliases for backward compatibility and import clarity
 ConfigIsolation = ConfigPaired
@@ -90,6 +94,7 @@ class CachePhase(str, Enum):
     HIT_MISS = "hit_miss"
     MULTI_TURN = "multi_turn"
     DECAY = "decay"
+    EPP_ROUTING = "epp_routing"
 
 class CacheState(str, Enum):
     COLD = "cold"
@@ -102,6 +107,8 @@ class CacheState(str, Enum):
     DECAY_PRIME = "decay_prime"
     DECAY_WARM = "decay_warm"
     DECAY_AFTER_WAIT = "decay_after_wait"
+    EPP_FIRST = "epp_first"
+    EPP_REPEAT = "epp_repeat"
 
 # exp9: model load phases
 class ModelLoadPhase(str, Enum):

@@ -1,6 +1,6 @@
 ---
 # Simulated prefill — inference-sim standing in for vLLM + GPU.
-# The simulator and GPU prefill server both listen on 8100 in this profile.
+# The simulator listens on 8100; GPU vLLM listens on 8000.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

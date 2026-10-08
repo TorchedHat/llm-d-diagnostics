@@ -30,4 +30,4 @@ export STORAGE_CLASS=""
 export PREFILL_REPLICAS=1
 export DECODE_REPLICAS=2
 
-export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8100"
+export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8000"

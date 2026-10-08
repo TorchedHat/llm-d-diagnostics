@@ -30,11 +30,13 @@ from client import (
     DATA_DIR,
     DISAGG_D1_URL,
     DISAGG_D2_URL,
+    EPP_URL,
     PREFILL_HOST,
     WARMUP,
     build_prompt,
     dot,
     env,
+    epp_enabled,
     print_config,
     progress,
     send_request,
@@ -95,6 +97,15 @@ def main():
             (DISAGG_D1_URL, DISAGG_HEADERS, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 5),
         ],
     }
+    if epp_enabled():
+        configs[ConfigIsolation.DISAGG_EPP] = [
+            (EPP_URL, None, HEAVY_PROMPT, HEAVY_MAX, Weight.HEAVY, 0),
+            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 1),
+            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 2),
+            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 3),
+            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 4),
+            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 5),
+        ]
 
     for config_name, request_specs in configs.items():
         progress(f"  Config: {config_name}")

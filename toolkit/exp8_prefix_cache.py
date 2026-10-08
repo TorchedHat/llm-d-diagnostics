@@ -16,7 +16,7 @@ Methodology:
   - Negative control (different prompt, same length) validates that TTFT
     drops are from prefix cache, not GPU warmth or connection state.
 
-Three phases:
+Three direct-to-pod phases plus an optional EPP-routed comparison:
 
   Phase 1 — Cache Hit/Miss Baseline
     For each run, execute four conditions in random order:
@@ -36,8 +36,13 @@ Three phases:
     Checks whether the cache survives a short idle period.
     (exp10 does the full eviction sweep.)
 
-All requests go to decode pods directly (port 8001, bypass sidecar) so
-that sidecar overhead does not confound the TTFT measurement.
+  Phase 4 — EPP Routing (when EPP_URL is set)
+    Repeat unique prompts through the Gateway. Backend pod identity is not
+    observable here, so this measures cache behavior under the configured
+    endpoint-selection policy rather than a guaranteed same-pod cache hit.
+
+Phases 1-3 go to decode pods directly (port 8001, bypassing the sidecar) so
+that sidecar overhead does not confound TTFT. Phase 4 intentionally uses EPP.
 
 Usage:
     python3 toolkit/exp8_prefix_cache.py
@@ -61,6 +66,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 from client import (
     DATA_DIR,
+    EPP_URL,
     MAX_TOKENS,
     PinnedConnection,
     build_prompt,
@@ -68,6 +74,7 @@ from client import (
     discover_pod_ips,
     dot,
     env,
+    epp_enabled,
     print_config,
     progress,
     write_run_info,
@@ -122,6 +129,7 @@ def main():
     # Create pinned connections for connection reuse
     conn0 = PinnedConnection(url0, pod_name=pod0_name)
     conn1 = None
+    conn_epp = PinnedConnection(EPP_URL, pod_name="epp-gateway") if epp_enabled() else None
     if has_second_pod:
         conn1 = PinnedConnection(url1, pod_name=pod1_name)
 
@@ -260,10 +268,26 @@ def main():
 
         progress("")
 
+        if conn_epp:
+            progress("--- Phase 4: Prefix Cache Through EPP ---")
+            progress("  Backend pod is intentionally not pinned; EPP selects each request.")
+            for run in range(1, RUNS + 1):
+                prompt = f"EPP cache probe {run}: " + build_prompt(500)
+                r_first = conn_epp.send_streaming(prompt, MAX_TOKENS)
+                record(CachePhase.EPP_ROUTING, "epp-gateway", run, "epp-gateway",
+                       500, 0, CacheState.EPP_FIRST, r_first)
+                r_repeat = conn_epp.send_streaming(prompt, MAX_TOKENS)
+                record(CachePhase.EPP_ROUTING, "epp-gateway", run, "epp-gateway",
+                       500, 0, CacheState.EPP_REPEAT, r_repeat)
+                dot()
+            progress("")
+
     finally:
         conn0.close()
         if conn1 is not None:
             conn1.close()
+        if conn_epp is not None:
+            conn_epp.close()
         writer.close()
 
     progress(f"=== Experiment 8 Complete === ({outfile})")

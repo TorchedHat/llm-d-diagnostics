@@ -30,7 +30,7 @@ Three layers, two execution domains:
 │  metrics_collector.py ── scrape Prometheus /metrics     │
 │                                                         │
 │  Talks to vLLM pods via in-cluster DNS:                 │
-│    vllm-prefill-svc:8100  (prefill, headless)             │
+│    vllm-prefill-svc:8000  (headless; direct pod port)     │
 │    vllm-decode-svc:8000   (decode, via sidecar, headless)│
 │    vllm-decode-direct-svc:8001 (decode, bypass sidecar)  │
 └─────────────────────────────────────────────────────────┘
@@ -74,6 +74,12 @@ privileges).
 ./toolkit/run.sh clusters/my-cluster analyze
 ```
 
+To compare EPP routing with manual prefill headers, install the EPP route
+against an existing InferencePool-capable Gateway and set `EPP_URL` in the
+cluster's `env.sh`. Applicable experiments add an EPP arm. Set
+`ROUTING_MODE=epp` to route exp4 fault probes through the Gateway. See
+[`docs/configuration.md`](../docs/configuration.md#epp-integration).
+
 ### Standalone metrics collection
 
 ```bash
@@ -87,13 +93,14 @@ COLLECT_DURATION=60 ./toolkit/run.sh clusters/my-cluster metrics
 
 | Command | What it measures | Key output |
 |---------|------------------|------------|
-| `latency` | Per-request TTFT overhead across prompt lengths (10-1000 tokens). Sequential, no concurrency. Compares BASELINE vs DISAGG-D1 vs DISAGG-D2. | `exp1-results.csv` |
-| `decompose` | Isolates overhead sources: A) prefill direct, B) decode direct (no sidecar), C) sidecar-only, D) full disagg. Derives T_sidecar, T_prefill_rt, T_overhead. | `exp1b-results.csv` |
-| `throughput` | Throughput scaling at concurrency 1-16. Compares BASELINE (1 GPU) vs DISAGG-1D (2 GPU) vs DISAGG-2D (3 GPU). | `exp2-results.csv` |
-| `isolation` | Head-of-line blocking: 1 heavy (1000 tokens) + 5 light (10 tokens) simultaneously. Measures whether P/D protects light requests. Streaming TTFT + ITL. | `exp3-results.csv` |
-| `seqlen` | Decomposition at multiple prompt lengths to find the crossover where KV transfer time exceeds prefill compute time. | `exp5-results.csv` |
-| `saturation` | Open-loop QPS sweep (1-32 QPS) to find where each topology saturates. Detects the knee where p99 exceeds SLO. | `exp6-results.csv` |
-| `mixed` | Realistic traffic: 80% short + 20% long, Poisson arrivals, streaming. The bottom-line verdict on disaggregation. | `exp7-results.csv` |
+| `latency` | Per-request latency across prompt lengths; compares baseline, manual D1/D2, and EPP when configured. | `exp1-results.csv` |
+| `decompose` | Isolates prefill, decode, sidecar, disaggregation, and optional EPP gateway overhead. | `exp1b-results.csv` |
+| `throughput` | Throughput under concurrent load, with an EPP arm when configured. | `exp2-results.csv` |
+| `isolation` | Head-of-line blocking with baseline, manual P/D, and optional EPP routing. Streaming TTFT + ITL. | `exp3-results.csv` |
+| `seqlen` | Decomposition over prompt lengths, including an optional EPP route. | `exp5-results.csv` |
+| `saturation` | Open-loop QPS sweep to find where each topology saturates; includes EPP when configured. | `exp6-results.csv` |
+| `mixed` | Realistic Poisson mixed-length workload with optional EPP routing. | `exp7-results.csv` |
+| `prefix-cache` | Prefix cache behavior; optional EPP phase reports that backend selection is not pinned. | `exp8-results.csv` |
 
 ### Fault tolerance (runs locally, kills pods)
 
@@ -141,7 +148,7 @@ specific cluster, model, or namespace.
 export NS=my-namespace
 export MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 export DATA_DIR="clusters/my-cluster/data"
-export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8100"
+export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8000"
 
 # For deploy.sh only:
 export VLLM_IMAGE="vllm/vllm-openai:v0.31.0"

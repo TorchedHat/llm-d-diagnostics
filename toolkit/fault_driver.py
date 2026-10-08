@@ -19,14 +19,14 @@ Usage (from exp4_fault.py via oc exec):
     # Probe mode: send requests every 200ms, output JSONL
     oc exec test-client -- python3 fault_driver.py probe \\
         --url http://vllm-decode-svc:8000/v1/completions \\
-        --prefill-host vllm-prefill-svc.ns.svc.cluster.local:8100 \\
+        --prefill-host vllm-prefill-svc.ns.svc.cluster.local:8000 \\
         --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\
         --interval 0.2 --duration 120
 
     # Load mode: sustained 4 QPS with streaming, output CSV
     oc exec test-client -- python3 fault_driver.py load \\
         --url http://vllm-decode-svc:8000/v1/completions \\
-        --prefill-host vllm-prefill-svc.ns.svc.cluster.local:8100 \\
+        --prefill-host vllm-prefill-svc.ns.svc.cluster.local:8000 \\
         --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\
         --qps 4 --duration 60 --output /scripts/toolkit/data/load-results.csv
 
@@ -47,6 +47,13 @@ import time
 from urllib.parse import urlparse
 
 
+def http_error(status, raw):
+    if status < 400:
+        return ""
+    detail = raw.decode("utf-8", errors="replace")[:500]
+    return f"HTTP {status}: {detail}".rstrip(": ")
+
+
 def send_request(host, port, path, payload, headers, use_tls, timeout=10):
     """Send a single non-streaming request. Returns (ttft_ms, total_ms, status, error)."""
     try:
@@ -61,11 +68,11 @@ def send_request(host, port, path, payload, headers, use_tls, timeout=10):
         conn.request("POST", path, body=payload, headers=headers)
         resp = conn.getresponse()
         ttft = time.monotonic() - start
-        resp.read()
+        raw = resp.read()
         total = time.monotonic() - start
         status = resp.status
         conn.close()
-        return round(ttft * 1000, 1), round(total * 1000, 1), status, ""
+        return round(ttft * 1000, 1), round(total * 1000, 1), status, http_error(status, raw)
     except Exception as e:
         elapsed = time.monotonic() - start
         return 0, round(elapsed * 1000, 1), 0, str(e)
@@ -95,6 +102,12 @@ def send_streaming(host, port, path, payload, headers, use_tls, timeout=30):
         conn.request("POST", path, body=payload, headers=headers)
         resp = conn.getresponse()
         status = resp.status
+        if status != 200:
+            raw = resp.read()
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+            conn.close()
+            return (elapsed_ms, elapsed_ms, 0, 0, 0, status,
+                    http_error(status, raw), "")
         while True:
             line = resp.readline()
             if not line:
@@ -152,6 +165,16 @@ def parse_url(url):
     return p.hostname, p.port, p.path or "/", p.scheme == "https"
 
 
+def request_headers(args):
+    """Build headers for the selected manual or EPP route."""
+    headers = {"Content-Type": "application/json"}
+    if args.route_mode == "manual":
+        if not args.prefill_host:
+            raise ValueError("--prefill-host is required with --route-mode manual")
+        headers["x-prefiller-host-port"] = args.prefill_host
+    return headers
+
+
 def run_probe(args):
     """Probe mode: send requests at fixed intervals, output JSONL to stdout."""
     host, port, path, use_tls = parse_url(args.url)
@@ -160,10 +183,7 @@ def run_probe(args):
         "prompt": args.prompt,
         "max_tokens": args.max_tokens,
     })
-    headers = {
-        "Content-Type": "application/json",
-        "x-prefiller-host-port": args.prefill_host,
-    }
+    headers = request_headers(args)
 
     stop = threading.Event()
 
@@ -202,10 +222,7 @@ def run_probe(args):
 def run_load(args):
     """Load mode: sustained QPS with Poisson arrivals and streaming measurement."""
     host, port, path, use_tls = parse_url(args.url)
-    headers = {
-        "Content-Type": "application/json",
-        "x-prefiller-host-port": args.prefill_host,
-    }
+    headers = request_headers(args)
 
     stop = threading.Event()
     results = []
@@ -337,7 +354,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="In-pod fault driver")
     parser.add_argument("--url", required=True)
-    parser.add_argument("--prefill-host", required=True)
+    parser.add_argument("--route-mode", choices=("manual", "epp"), default="manual")
+    parser.add_argument("--prefill-host")
     parser.add_argument("--model", required=True)
     parser.add_argument("--prompt", default="Hello world")
     parser.add_argument("--max-tokens", type=int, default=10)
@@ -355,6 +373,8 @@ def main():
     load_p.add_argument("--output", default="data/load-results.csv")
 
     args = parser.parse_args()
+    if args.route_mode == "manual" and not args.prefill_host:
+        parser.error("--prefill-host is required with --route-mode manual")
 
     if args.mode == "probe":
         run_probe(args)

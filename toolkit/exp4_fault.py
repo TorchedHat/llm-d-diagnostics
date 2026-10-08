@@ -82,9 +82,11 @@ from client import (
     DATA_DIR,
     DISAGG_D1_URL,
     DISAGG_D2_URL,
+    EPP_URL,
     MODEL,
     NS,
     PREFILL_HOST,
+    ROUTING_MODE,
     env,
     progress,
     send_disagg,
@@ -95,8 +97,8 @@ from schemas import Exp4Row, TypedCSVWriter
 TEST_CLIENT = env("TEST_CLIENT", "test-client")
 VLLM_CONTAINER = env("VLLM_CONTAINER", "vllm")
 
-DECODE1_URL = DISAGG_D1_URL
-DECODE2_URL = DISAGG_D2_URL
+DECODE1_URL = EPP_URL if ROUTING_MODE == "epp" else DISAGG_D1_URL
+DECODE2_URL = EPP_URL if ROUTING_MODE == "epp" else DISAGG_D2_URL
 
 WORKLOAD_TYPE = env("WORKLOAD_TYPE", "deployment")  # or "statefulset"
 PREFILL_DEPLOY = env("PREFILL_DEPLOY", "vllm-prefill")
@@ -247,6 +249,16 @@ def oc(*args):
 REMOTE_DIR = "/scripts/toolkit"
 
 
+def fault_driver_route_args():
+    """Return the route options shared by in-pod fault-driver commands."""
+    args = ["--route-mode", ROUTING_MODE]
+    if ROUTING_MODE == "manual":
+        args.extend(["--prefill-host", PREFILL_HOST])
+    elif not EPP_URL:
+        raise ValueError("ROUTING_MODE=epp requires EPP_URL")
+    return args
+
+
 def send_via_test_client(url, prompt="Hello world", max_tokens=10,
                          curl_timeout=10, subprocess_timeout=30):
     """Send a single request via the in-pod fault driver.
@@ -262,7 +274,7 @@ def send_via_test_client(url, prompt="Hello world", max_tokens=10,
         "oc", "exec", TEST_CLIENT, "-n", NS, "--",
         "python3", f"{REMOTE_DIR}/fault_driver.py",
         "--url", url,
-        "--prefill-host", PREFILL_HOST,
+        *fault_driver_route_args(),
         "--model", MODEL,
         "--prompt", prompt,
         "--max-tokens", str(max_tokens),
@@ -319,7 +331,7 @@ def send_streaming_via_test_client(url, prompt="Hello world", max_tokens=20,
         "oc", "exec", TEST_CLIENT, "-n", NS, "--",
         "python3", f"{REMOTE_DIR}/fault_driver.py",
         "--url", url,
-        "--prefill-host", PREFILL_HOST,
+        *fault_driver_route_args(),
         "--model", MODEL,
         "--prompt", prompt,
         "--max-tokens", str(max_tokens),
@@ -371,7 +383,7 @@ def start_probe(url, interval=0.2, duration=120):
         "oc", "exec", TEST_CLIENT, "-n", NS, "--",
         "python3", f"{REMOTE_DIR}/fault_driver.py",
         "--url", url,
-        "--prefill-host", PREFILL_HOST,
+        *fault_driver_route_args(),
         "--model", MODEL,
         "--timeout", "5",
         "probe", "--interval", str(interval), "--duration", str(duration),
@@ -494,11 +506,18 @@ def start_metrics_collector(sample_interval=2):
     Returns a Popen object. Metrics are written to data/metrics-timeseries.csv
     inside the pod.
     """
+    metric_env = []
+    for name in ("METRICS_ENDPOINTS", "EPP_URL", "EPP_METRICS_URL",
+                 "EPP_RELEASE_NAME", "EPP_SERVICE_NAME"):
+        value = os.environ.get(name)
+        if value:
+            metric_env.append(f"{name}={value}")
     cmd = [
         "oc", "exec", TEST_CLIENT, "-n", NS, "--",
         "env", f"NS={NS}",
         f"DATA_DIR={REMOTE_DIR}/data",
         f"SAMPLE_INTERVAL={sample_interval}",
+        *metric_env,
         "python3", f"{REMOTE_DIR}/metrics_collector.py",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -530,7 +549,7 @@ def start_load(url, qps=4, duration=60, output_name="load-results.csv"):
         "oc", "exec", TEST_CLIENT, "-n", NS, "--",
         "python3", f"{REMOTE_DIR}/fault_driver.py",
         "--url", url,
-        "--prefill-host", PREFILL_HOST,
+        *fault_driver_route_args(),
         "--model", MODEL,
         "--max-tokens", "20",
         "--timeout", "15",
@@ -1593,11 +1612,18 @@ def run_exp_4a(ctx: ExperimentContext) -> None:
 def run_exp_4b(ctx: ExperimentContext) -> None:
     """4b: Prefill pod failure."""
     progress("=== 4b: Prefill pod failure ===")
-    predict("4b",
-            "Both decode pods fail immediately (prefill unavailable for KV transfer). "
-            f"Recovery in 60-120s. Post-recovery TTFT within 2x of baseline ({ctx.baseline_d1.ttft_mean}ms).",
-            "Prefill is shared — its death affects all decode pods. Recovery = "
-            "new prefill pod + GPU init + ZMQ re-discovery by decode sidecars.")
+    if ROUTING_MODE == "epp":
+        predict("4b",
+                "Requests may fail during endpoint discovery, then use decode-only "
+                "serving until a replacement prefill endpoint is available.",
+                "EPP can schedule decode without prefill. Successful responses alone "
+                "do not establish that KV transfer has resumed.")
+    else:
+        predict("4b",
+                "Both decode pods fail immediately (prefill unavailable for KV transfer). "
+                f"Recovery in 60-120s. Post-recovery TTFT within 2x of baseline ({ctx.baseline_d1.ttft_mean}ms).",
+                "Prefill is shared — its death affects all decode pods. Recovery = "
+                "new prefill pod + GPU init + ZMQ re-discovery by decode sidecars.")
     progress("")
 
     progress("  Pre-flight: verify disagg works")
@@ -1619,7 +1645,8 @@ def run_exp_4b(ctx: ExperimentContext) -> None:
     progress(f"  {out}")
     progress("")
 
-    progress("  Immediate request through decode-1 sidecar (prefill down):")
+    route_label = "EPP route" if ROUTING_MODE == "epp" else "decode-1 sidecar"
+    progress(f"  Immediate request through {route_label} (prefill down):")
     t, tot, code, err = send_via_test_client(DECODE1_URL)
     ctx.record("4b", "during", t, tot, code, "prefill dead", err)
 

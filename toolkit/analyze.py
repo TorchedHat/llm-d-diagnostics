@@ -520,8 +520,12 @@ def analyze_exp1b(data_dir):
 
     # Filter: only full responses (completion_tokens >= 10)
     configs = {}
-    for cfg in ["A-prefill-direct", "B-decode-direct",
-                "C-sidecar-only", "D-disaggregated"]:
+    required_configs = ["A-prefill-direct", "B-decode-direct",
+                        "C-sidecar-only", "D-disaggregated"]
+    config_names = list(required_configs)
+    if any(r["config"] == "E-EPP-gateway" for r in rows):
+        config_names.append("E-EPP-gateway")
+    for cfg in config_names:
         all_v = [safe_float(r["ttft_ms"]) for r in rows
                  if r["config"] == cfg and get_status(r) == 200]
         full_v = [safe_float(r["ttft_ms"]) for r in rows
@@ -541,7 +545,7 @@ def analyze_exp1b(data_dir):
         print()
 
     # Decomposition
-    if any(configs[c]["n"] == 0 for c in configs):
+    if any(configs[c]["n"] == 0 for c in required_configs):
         print("  Decomposition: insufficient data (one or more configs have no valid rows)")
         return
 
@@ -616,6 +620,27 @@ def analyze_exp1b(data_dir):
     else:
         print(f"  Paired-difference decomposition: insufficient matched runs "
               f"({len(paired_runs)} found, need >= 5)")
+
+    if "E-EPP-gateway" in configs and configs["E-EPP-gateway"]["n"] > 0:
+        epp = configs["E-EPP-gateway"]
+        manual = configs["D-disaggregated"]
+        delta = epp["median"] - manual["median"]
+        print("  EPP route comparison (end-to-end TTFT; EPP selects the backend):")
+        print(f"    Manual D: {manual['median']:.1f}ms (n={manual['n']})")
+        print(f"    EPP:      {epp['median']:.1f}ms (n={epp['n']})")
+        print(f"    EPP - D:  {delta:+.1f}ms ({delta / manual['median'] * 100:+.1f}%)"
+              if manual["median"] > 0 else f"    EPP - D:  {delta:+.1f}ms")
+        paired_epp_runs = [run for run, cfgs in run_data.items()
+                           if "D-disaggregated" in cfgs and "E-EPP-gateway" in cfgs]
+        if len(paired_epp_runs) >= 5:
+            epp_diffs = [run_data[run]["E-EPP-gateway"] -
+                         run_data[run]["D-disaggregated"]
+                         for run in paired_epp_runs]
+            s_epp = stats(epp_diffs)
+            print(f"    Paired EPP - D: {s_epp['mean']:+.1f}ms "
+                  f"(95%CI [{s_epp['ci95_lo']:.1f}, {s_epp['ci95_hi']:.1f}], "
+                  f"n={s_epp['n']})")
+        print()
 
     print()
 
@@ -771,6 +796,14 @@ def analyze_exp3(data_dir):
                     print("    Observed: disagg improves decode quality")
                 else:
                     print("    Observed: disagg degrades decode quality")
+            epp_itl = [safe_float(r["itl_ms"]) for r in rows
+                       if r["config"] == "DISAGG-EPP" and r["weight"] == "light"
+                       and get_status(r) == 200 and safe_float(r["itl_ms"]) > 0]
+            epp_itl_s = stats(epp_itl)
+            if bl_itl_s["n"] > 0 and epp_itl_s["n"] > 0:
+                print(f"  EPP light-request ITL: baseline p50={bl_itl_s['median']:.2f}ms, "
+                      f"EPP p50={epp_itl_s['median']:.2f}ms "
+                      f"(n={epp_itl_s['n']}; EPP selects backend dynamically)")
             print()
         elif all_itl:
             print("  ITL: all values <1ms (model generates faster than measurement resolution)")
@@ -781,7 +814,10 @@ def analyze_exp3(data_dir):
     print("  prefill queue contention, not decode isolation):")
     print()
 
-    for cfg in ["BASELINE", "DISAGG-2D"]:
+    ttft_configs = ["BASELINE", "DISAGG-2D"]
+    if any(r["config"] == "DISAGG-EPP" for r in rows):
+        ttft_configs.append("DISAGG-EPP")
+    for cfg in ttft_configs:
         for weight in ["heavy", "light"]:
             v = [safe_float(r["ttft_ms"]) for r in rows
                  if r["config"] == cfg and r["weight"] == weight
@@ -809,6 +845,15 @@ def analyze_exp3(data_dir):
             print("    prefill pod (all requests queue through same sidecar+NIXL pipeline)")
         else:
             print("    Disagg light TTFT is faster — unexpected, investigate")
+    epp_light = [safe_float(r["ttft_ms"]) for r in rows
+                 if r["config"] == "DISAGG-EPP" and r["weight"] == "light"
+                 and get_status(r) == 200]
+    epp_light_s = stats(epp_light)
+    if bl_s["n"] > 0 and epp_light_s["n"] > 0 and epp_light_s["median"] > 0:
+        print(f"  EPP light TTFT vs baseline: "
+              f"{bl_s['median'] / epp_light_s['median']:.3f} "
+              f"(baseline/EPP; EPP selects backend dynamically)")
+        print()
 
 
 def analyze_exp4(data_dir):
@@ -1051,6 +1096,8 @@ def analyze_exp5(data_dir):
     prompt_lengths = sorted(set(safe_int(r["prompt_tokens_target"]) for r in rows))
     config_names = ["A-prefill-direct", "B-decode-direct",
                     "C-sidecar-only", "D-disaggregated"]
+    if any(r["config"] == "E-EPP-gateway" for r in rows):
+        config_names.append("E-EPP-gateway")
 
     # Per-length decomposition table
     print(f"  {'Length':>8} | {'T_sidecar':>10} | {'T_transfer':>10} | "
@@ -1104,6 +1151,18 @@ def analyze_exp5(data_dir):
                           f"status codes: {', '.join(str(s) for s in sorted(status_codes))})")
             else:
                 print(f"  {pt:>8} | (insufficient data: {', '.join(missing)})")
+
+        epp_stats = cfg_stats.get("E-EPP-gateway", stats([]))
+        if epp_stats["n"] > 0:
+            epp_delta = epp_stats["median"] - d["median"] if d["n"] else None
+            baseline_delta = epp_stats["median"] - a["median"] if a["n"] else None
+            comparison = []
+            if epp_delta is not None:
+                comparison.append(f"vs D {epp_delta:+.1f}ms")
+            if baseline_delta is not None:
+                comparison.append(f"vs A {baseline_delta:+.1f}ms")
+            print(f"    EPP gateway: {epp_stats['median']:.1f}ms (n={epp_stats['n']}; "
+                  f"{', '.join(comparison)})")
 
     print()
 
@@ -1734,6 +1793,7 @@ def analyze_exp7(data_dir):
 
     bl_qps = 0.0
     dg_qps = 0.0
+    goodput_by_config = {}
     for cfg in configs:
         cfg_rows = [r for r in rows if r["config"] == cfg]
         ok = sum(1 for r in cfg_rows if get_status(r) == 200)
@@ -1746,6 +1806,7 @@ def analyze_exp7(data_dir):
             duration = departures[-1] - departures[0] if len(departures) >= 2 else 0
 
         goodput = ok / duration if duration > 0 else 0
+        goodput_by_config[cfg] = goodput
 
         if cfg == baseline:
             bl_qps = goodput
@@ -1767,6 +1828,27 @@ def analyze_exp7(data_dir):
     else:
         print("  3. GOODPUT: insufficient data")
     print()
+
+    epp_cfg = "DISAGG-EPP"
+    if epp_cfg in configs:
+        epp_ttft = cfg_wl_stats.get((epp_cfg, "short"), (stats([]),))[0]
+        epp_itl = cfg_wl_stats.get((epp_cfg, "short"),
+                                   (stats([]), stats([]), stats([])))[2]
+        epp_qps = goodput_by_config.get(epp_cfg, 0.0)
+        print("  EPP Gateway comparison (supplemental; backend selection is dynamic):")
+        if bl_ttft["n"] > 0 and epp_ttft["n"] > 0:
+            print(f"    Short TTFT p50: baseline={bl_ttft['median']:.1f}ms, "
+                  f"EPP={epp_ttft['median']:.1f}ms "
+                  f"(EPP - baseline {epp_ttft['median'] - bl_ttft['median']:+.1f}ms)")
+        else:
+            print("    Short TTFT p50: insufficient data")
+        if epp_itl["n"] > 0:
+            print(f"    Short-request ITL p99: {epp_itl['median']:.2f}ms "
+                  f"(n={epp_itl['n']})")
+        else:
+            print("    Short-request ITL p99: unavailable")
+        print(f"    Goodput: baseline={bl_qps:.2f} req/s, EPP={epp_qps:.2f} req/s")
+        print()
 
     # Overall verdict
     print("  ─────────────────────────────────────────────────")
@@ -1888,6 +1970,49 @@ def analyze_exp7(data_dir):
                           f"compute={s_u['mean']:.0f}% (p90={s_u['p90']:.0f}%), "
                           f"memory={s_m['mean']:.0f}% (p90={s_m['p90']:.0f}%)")
         print()
+
+
+def analyze_exp8(data_dir):
+    """Experiment 8: Prefix Cache Characterization, including optional EPP."""
+    rows = load_csv(os.path.join(data_dir, "exp8-results.csv"))
+    if not rows:
+        print("  No data found")
+        return
+
+    errors = sum(1 for r in rows if get_status(r) != 200)
+    print(f"  Data quality: {len(rows)} rows, {errors} errors")
+    groups = defaultdict(list)
+    for row in rows:
+        if get_status(row) == 200:
+            groups[(row.get("phase", ""), row.get("config", ""),
+                    row.get("cache_state", ""))].append(safe_float(row["ttft_ms"]))
+
+    print(f"  {'Phase':>14} | {'Config':>16} | {'Cache state':>20} | "
+          f"{'n':>4} | {'TTFT p50':>10} | {'p90':>9}")
+    print(f"  {'-'*14}-+-{'-'*16}-+-{'-'*20}-+-{'-'*4}-+-{'-'*10}-+-{'-'*9}")
+    for (phase, config, state), values in sorted(groups.items()):
+        s = stats(values)
+        print(f"  {phase:>14} | {config:>16} | {state:>20} | "
+              f"{s['n']:>4} | {s['median']:>8.1f}ms | {s['p90']:>7.1f}ms")
+
+    epp_by_run = defaultdict(dict)
+    for row in rows:
+        if (row.get("phase") == "epp_routing" and get_status(row) == 200
+                and row.get("cache_state") in {"epp_first", "epp_repeat"}):
+            epp_by_run[row.get("run", "")][row["cache_state"]] = safe_float(row["ttft_ms"])
+    paired = [(values["epp_first"], values["epp_repeat"])
+              for values in epp_by_run.values()
+              if "epp_first" in values and "epp_repeat" in values]
+    if paired:
+        first = stats([a for a, _ in paired])
+        repeat = stats([b for _, b in paired])
+        deltas = stats([b - a for a, b in paired])
+        print("\n  EPP cache probes (backend pod is not pinned):")
+        print(f"    First p50={first['median']:.1f}ms; repeat p50={repeat['median']:.1f}ms; "
+              f"paired repeat-first={deltas['mean']:+.1f}ms "
+              f"(95%CI [{deltas['ci95_lo']:.1f}, {deltas['ci95_hi']:.1f}], "
+              f"n={deltas['n']})")
+        print("    Interpret as endpoint-policy behavior; repeats may reach different backends.")
 
 
 # ── Experiment 11: Throughput vs Prompt Length ────────────────────────────────
@@ -2252,6 +2377,17 @@ def analyze_exp14(data_dir):
                       f"decode={b['median']:.0f}ms ({diff_pct:+.0f}%)")
         print()
 
+    if "E-EPP-gateway" in configs and cfg_d:
+        print("  EPP route comparison (end-to-end median TTFT; dynamic backend selection):")
+        for pt in prompt_lens:
+            epp = stats(by_key.get(("E-EPP-gateway", pt), []))
+            manual = stats(by_key.get((cfg_d, pt), []))
+            if epp["n"] and manual["n"]:
+                delta = epp["median"] - manual["median"]
+                print(f"    {pt:>5}tok: EPP={epp['median']:.1f}ms, "
+                      f"manual D={manual['median']:.1f}ms, EPP-D={delta:+.1f}ms")
+        print()
+
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -2272,6 +2408,7 @@ def main():
         ("Experiment 5: Sequence Length Sweep", "exp5-results.csv", analyze_exp5),
         ("Experiment 6: Saturation Profiling", "exp6-results.csv", analyze_exp6),
         ("Experiment 7: Mixed Workload", "exp7-results.csv", analyze_exp7),
+        ("Experiment 8: Prefix Cache Characterization", "exp8-results.csv", analyze_exp8),
         ("Experiment 11: Throughput vs Prompt Length", "exp11-results.csv", analyze_exp11),
         ("Experiment 12: Throughput vs Output Length", "exp12-results.csv", analyze_exp12),
         ("Experiment 13: Saturation Ceiling", "exp13-results.csv", analyze_exp13),

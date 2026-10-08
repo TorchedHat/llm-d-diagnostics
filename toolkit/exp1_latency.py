@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from client import (
     DATA_DIR,
+    EPP_URL,
     MAX_TOKENS,
     RUNS,
     PinnedConnection,
@@ -30,6 +31,8 @@ from client import (
     discover_pod_ips,
     dot,
     env,
+    epp_enabled,
+    prefill_pod_host_port,
     prefill_pod_url_by_ip,
     print_config,
     progress,
@@ -70,7 +73,7 @@ def main():
     progress(f"  Prefill: {prefill_name} ({prefill_ip})")
     progress(f"  Decode1: {decode1_name} ({decode1_ip})")
 
-    prefill_host_port = f"{prefill_ip}:8100"
+    prefill_host_port = prefill_pod_host_port(prefill_ip)
 
     conns = [
         (ConfigExp1.BASELINE, PinnedConnection(
@@ -83,6 +86,10 @@ def main():
             extra_headers={"x-prefiller-host-port": prefill_host_port},
         )),
     ]
+
+    if epp_enabled():
+        conns.append((ConfigExp1.DISAGG_EPP, PinnedConnection(
+            EPP_URL, pod_name="epp-gateway")))
 
     if len(decode_pods) >= 2:
         decode2_name, decode2_ip = decode_pods[1]

@@ -38,12 +38,14 @@ from client import (
     DATA_DIR,
     DISAGG_D1_URL,
     DISAGG_D2_URL,
+    EPP_URL,
     MAX_TOKENS,
     PREFILL_HOST,
     WARMUP,
     build_prompt,
     dot,
     env,
+    epp_enabled,
     print_config,
     progress,
     send_request,
@@ -64,12 +66,16 @@ CONFIGS = [
     (ConfigThroughput.DISAGG_1D, "sidecar -> prefill -> NIXL -> 1 decode"),
     (ConfigThroughput.DISAGG_2D, "sidecar -> prefill -> NIXL -> 2 decodes (round-robin)"),
 ]
+if epp_enabled():
+    CONFIGS.append((ConfigThroughput.DISAGG_EPP, "EPP Gateway -> scheduled prefill + decode"))
 
 
 def pick_url(config_name, seq):
     """Select the URL for a given config and sequence number."""
     if config_name == ConfigThroughput.BASELINE:
         return BASELINE_URL
+    elif config_name == ConfigThroughput.DISAGG_EPP:
+        return EPP_URL
     elif config_name == ConfigThroughput.DISAGG_1D:
         return DISAGG_D1_URL
     else:  # DISAGG-2D: round-robin
@@ -78,7 +84,7 @@ def pick_url(config_name, seq):
 
 def pick_headers(config_name):
     """Select headers for a given config."""
-    if config_name == ConfigThroughput.BASELINE:
+    if config_name in {ConfigThroughput.BASELINE, ConfigThroughput.DISAGG_EPP}:
         return None
     return DISAGG_HEADERS
 
