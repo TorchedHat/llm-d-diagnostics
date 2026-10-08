@@ -16,6 +16,8 @@ spec:
     metadata:
       labels:
         app: vllm-prefill
+        llm-d.ai/role: prefill
+        llm-d-diagnostics.ai/model-server: "true"
         app.kubernetes.io/part-of: vllm-disagg
     spec:
       resourceClaims:
@@ -32,7 +34,7 @@ spec:
         - --host
         - "0.0.0.0"
         - --port
-        - "8100"
+        - "8000"
         - --dtype
         - $(DTYPE)
         - --gpu-memory-utilization
@@ -57,7 +59,7 @@ spec:
         - configMapRef:
             name: vllm-model-config
         ports:
-        - containerPort: 8100
+        - containerPort: 8000
           name: http
           protocol: TCP
         - containerPort: 5557
@@ -75,20 +77,20 @@ spec:
         startupProbe:
           httpGet:
             path: /health
-            port: 8100
+            port: 8000
           failureThreshold: 60
           periodSeconds: 10
           timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /health
-            port: 8100
+            port: 8000
           periodSeconds: 10
           timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /health
-            port: 8100
+            port: 8000
           periodSeconds: 30
           timeoutSeconds: 5
         lifecycle:

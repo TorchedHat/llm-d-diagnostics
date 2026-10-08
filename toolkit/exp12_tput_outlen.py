@@ -38,11 +38,13 @@ from client import (
     DATA_DIR,
     DISAGG_D1_URL,
     DISAGG_D2_URL,
+    EPP_URL,
     PREFILL_HOST,
     WARMUP,
     build_prompt,
     dot,
     env,
+    epp_enabled,
     print_config,
     progress,
     send_request,
@@ -59,10 +61,15 @@ _CONFIG_MAP = {
     "BASELINE": ConfigThroughput.BASELINE,
     "DISAGG-1D": ConfigThroughput.DISAGG_1D,
     "DISAGG-2D": ConfigThroughput.DISAGG_2D,
+    "EPP": ConfigThroughput.DISAGG_EPP,
 }
 _ALL_CONFIGS = [ConfigThroughput.BASELINE, ConfigThroughput.DISAGG_1D, ConfigThroughput.DISAGG_2D]
+if epp_enabled():
+    _ALL_CONFIGS.append(ConfigThroughput.DISAGG_EPP)
 CONFIGS = ([_CONFIG_MAP[x.strip()] for x in env("CONFIGS", "").split(",") if x.strip()]
            or _ALL_CONFIGS)
+if ConfigThroughput.DISAGG_EPP in CONFIGS and not epp_enabled():
+    raise SystemExit("CONFIGS includes EPP but EPP_URL is not configured")
 
 DISAGG_HEADERS = {"x-prefiller-host-port": PREFILL_HOST}
 
@@ -105,6 +112,8 @@ def main():
             for i in range(WARMUP):
                 if config_name == ConfigThroughput.BASELINE:
                     send_request(BASELINE_URL, warmup_prompt, max_tokens)
+                elif config_name == ConfigThroughput.DISAGG_EPP:
+                    send_request(EPP_URL, warmup_prompt, max_tokens)
                 elif config_name == ConfigThroughput.DISAGG_2D and i % 2 == 1:
                     send_request(DISAGG_D2_URL, warmup_prompt, max_tokens,
                                  extra_headers=DISAGG_HEADERS)
@@ -133,6 +142,9 @@ def main():
                         elif config_name == ConfigThroughput.DISAGG_1D:
                             f = pool.submit(send_one, DISAGG_D1_URL,
                                             DISAGG_HEADERS, prompt, max_tokens, "d1")
+                        elif config_name == ConfigThroughput.DISAGG_EPP:
+                            f = pool.submit(send_one, EPP_URL, None,
+                                            prompt, max_tokens, "epp")
                         else:
                             if run % 2 == 1:
                                 f = pool.submit(send_one, DISAGG_D1_URL,

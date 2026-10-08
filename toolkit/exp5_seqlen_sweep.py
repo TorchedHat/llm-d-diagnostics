@@ -11,10 +11,10 @@ prefill compute time. Finding that crossover is the most important
 characterization of a disaggregated deployment.
 
 Configs (identical to exp1b):
-    A. Baseline:        client -> prefill vLLM (8100)
+    A. Baseline:        client -> prefill vLLM (pod port 8000; SIM uses 8100)
     B. Direct decode:   client -> decode vLLM (8001), no sidecar
     C. Sidecar-only:    client -> sidecar (8000) -> decode vLLM (8001), no disagg
-    D. Disaggregated:   client -> sidecar (8000) -> prefill (8100) -> NIXL -> decode
+    D. Disaggregated:   client -> sidecar (8000) -> prefill -> NIXL -> decode
 
 Derived at each sequence length:
     T_sidecar    = C - B
@@ -42,6 +42,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from client import (
     DATA_DIR,
+    EPP_URL,
     MAX_TOKENS,
     PinnedConnection,
     build_prompt,
@@ -50,6 +51,8 @@ from client import (
     discover_pod_ips,
     dot,
     env,
+    epp_enabled,
+    prefill_pod_host_port,
     prefill_pod_url_by_ip,
     print_config,
     progress,
@@ -104,12 +107,13 @@ def main():
     conn_d = PinnedConnection(
         decode_pod_url_by_ip(decode_ip),
         pod_name=decode_name,
-        extra_headers={"x-prefiller-host-port": f"{prefill_ip}:8100"},
+        extra_headers={"x-prefiller-host-port": prefill_pod_host_port(prefill_ip)},
     )
+    conn_epp = PinnedConnection(EPP_URL, pod_name="epp-gateway") if epp_enabled() else None
 
     CONFIGS = [
         (ConfigDecompose.A_PREFILL_DIRECT, conn_a,
-         "client -> prefill:8100 (baseline)"),
+         f"client -> {conn_a.url} (baseline)"),
         (ConfigDecompose.B_DECODE_DIRECT,  conn_b,
          "client -> decode:8001 (bypass sidecar)"),
         (ConfigDecompose.C_SIDECAR_ONLY,   conn_c,
@@ -117,6 +121,9 @@ def main():
         (ConfigDecompose.D_DISAGGREGATED,  conn_d,
          "client -> sidecar -> prefill -> NIXL -> decode"),
     ]
+    if conn_epp:
+        CONFIGS.append((ConfigDecompose.E_EPP_GATEWAY, conn_epp,
+                        "client -> Gateway API -> EPP -> prefill + decode"))
 
     progress("")
     for name, conn, desc in CONFIGS:
@@ -191,6 +198,8 @@ def main():
         conn_b.close()
         conn_c.close()
         conn_d.close()
+        if conn_epp:
+            conn_epp.close()
 
     writer.close()
     progress("")

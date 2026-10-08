@@ -1,0 +1,70 @@
+provider:
+  name: none
+
+httpRoute:
+  create: true
+  requestTimeout: 300s
+
+router:
+  modelServers:
+    type: vllm
+    protocol: http
+    matchLabels:
+      llm-d-diagnostics.ai/model-server: "true"
+    targetPorts:
+      - number: 8000
+
+  inferencePool:
+    create: true
+    failureMode: FailClosed
+
+  epp:
+    replicas: 1
+    image:
+      registry: ghcr.io/llm-d
+      repository: llm-d-router-endpoint-picker
+      tag: v0.11.0
+      pullPolicy: IfNotPresent
+    flags:
+      v: 2
+      allow-experimental-plugins: "true"
+    pluginsConfigFile: diagnostics-pd.yaml
+    pluginsCustomConfig:
+      diagnostics-pd.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: openai-parser
+        - type: prefill-filter
+        - type: decode-filter
+        - type: random-picker
+        - type: always-disagg-pd-decider
+        - type: disagg-profile-handler
+          parameters:
+            deciders:
+              prefill: always-disagg-pd-decider
+        requestHandler:
+          parsers:
+          - pluginRef: openai-parser
+        schedulingProfiles:
+        - name: prefill
+          plugins:
+          - pluginRef: prefill-filter
+          - pluginRef: random-picker
+        - name: decode
+          plugins:
+          - pluginRef: decode-filter
+          - pluginRef: random-picker
+    resources:
+      requests:
+        cpu: 2
+        memory: 2Gi
+      limits:
+        cpu: 4
+        memory: 4Gi
+
+  monitoring:
+    prometheus:
+      enabled: false
+      auth:
+        enabled: false

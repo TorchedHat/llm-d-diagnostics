@@ -78,9 +78,37 @@ if [[ "$SIDECAR_SCHEME" != "http" && "$SIDECAR_SCHEME" != "https" ]]; then
     exit 1
 fi
 export SIDECAR_SCHEME
+ROUTING_MODE="${ROUTING_MODE:-manual}"
+EPP_URL="${EPP_URL:-}"
+EPP_RELEASE_NAME="${EPP_RELEASE_NAME:-llm-d-epp}"
+EPP_SERVICE_NAME="${EPP_SERVICE_NAME:-${EPP_RELEASE_NAME}-epp}"
+EPP_METRICS_URL="${EPP_METRICS_URL:-http://${EPP_SERVICE_NAME}:9090}"
+if [[ "$ROUTING_MODE" != "manual" && "$ROUTING_MODE" != "epp" ]]; then
+    echo "ERROR: ROUTING_MODE must be 'manual' or 'epp'"
+    exit 1
+fi
+if [[ "$ROUTING_MODE" == "epp" && -z "$EPP_URL" ]]; then
+    echo "ERROR: ROUTING_MODE=epp requires EPP_URL in $CLUSTER_DIR/env.sh"
+    exit 1
+fi
+if [[ -n "$EPP_URL" && "$EPP_URL" != http://* && "$EPP_URL" != https://* ]]; then
+    echo "ERROR: EPP_URL must start with http:// or https://"
+    exit 1
+fi
+export ROUTING_MODE EPP_URL EPP_RELEASE_NAME EPP_SERVICE_NAME EPP_METRICS_URL
+PREFILL_PORT=8000
+if [[ "${SIM:-}" == "1" ]]; then
+    PREFILL_PORT=8100
+fi
+PREFILL_HOST="${PREFILL_HOST:-vllm-prefill-svc.${NS}.svc.cluster.local:${PREFILL_PORT}}"
+BASELINE_URL="${BASELINE_URL:-http://vllm-prefill-svc:${PREFILL_PORT}/v1/completions}"
+DISAGG_URL="${DISAGG_URL:-${SIDECAR_SCHEME}://vllm-decode-svc:8000/v1/completions}"
+DISAGG_D1_URL="${DISAGG_D1_URL:-$DISAGG_URL}"
+DISAGG_D2_URL="${DISAGG_D2_URL:-$DISAGG_URL}"
+export PREFILL_HOST BASELINE_URL DISAGG_URL DISAGG_D1_URL DISAGG_D2_URL
 mkdir -p "$DATA_DIR"
 
-POD=test-client
+POD="${TEST_CLIENT:-test-client}"
 REMOTE_DIR="/scripts/toolkit"
 
 # ── Preflight check ───────────────────────────────────────────────────────
@@ -105,18 +133,27 @@ preflight() {
     local env_vars="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME"
     [ -n "${SIM:-}" ] && env_vars="$env_vars SIM=$SIM"
 
-    for endpoint in "baseline:http://vllm-prefill-svc:8100" \
-                    "decode:${SIDECAR_SCHEME}://vllm-decode-svc:8000"; do
-        local name="${endpoint%%:*}"
-        local url="${endpoint#*:}/v1/completions"
+    local endpoints=(
+        "baseline|$BASELINE_URL|none"
+        "manual-decode|$DISAGG_D1_URL|manual"
+    )
+    if [[ "$DISAGG_D2_URL" != "$DISAGG_D1_URL" ]]; then
+        endpoints+=("manual-decode-2|$DISAGG_D2_URL|manual")
+    fi
+    if [ -n "$EPP_URL" ]; then
+        endpoints+=("epp|$EPP_URL|epp")
+    fi
+    for endpoint in "${endpoints[@]}"; do
+        IFS='|' read -r name url route <<< "$endpoint"
 
         local result
-        result=$(oc exec "$POD" -n "$NS" -- env $env_vars \
+        result=$(oc exec "$POD" -n "$NS" -- env $env_vars ENDPOINT_URL="$url" ROUTE_KIND="$route" \
             python3 -c "
 import sys; sys.path.insert(0, '$REMOTE_DIR')
+import os
 from client import send_request, PREFILL_HOST
-r = send_request('$url', 'hello', 5,
-    extra_headers={'x-prefiller-host-port': PREFILL_HOST} if 'decode' in '$name' else None)
+headers = {'x-prefiller-host-port': PREFILL_HOST} if os.environ['ROUTE_KIND'] == 'manual' else None
+r = send_request(os.environ['ENDPOINT_URL'], 'hello', 5, extra_headers=headers)
 print(f'{r.status}|{r.completion_tokens}|{r.error}')
 " 2>/dev/null || echo "0|0|connection failed")
 
@@ -146,14 +183,20 @@ print(f'{r.status}|{r.completion_tokens}|{r.error}')
 # ── Run remote experiment ──────────────────────────────────────────────────
 # Discover pod IPs from host (where oc works) and pass as env vars.
 # This provides pod discovery without requiring RBAC inside test-client.
-PREFILL_IPS=$(oc get pods -l app=vllm-prefill -n "$NS" \
+PREFILL_IPS=$(oc get pods -l "${PREFILL_SELECTOR:-app=vllm-prefill}" -n "$NS" \
     -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{":"}{.status.podIP}{","}{end}' \
     2>/dev/null | sed 's/,$//')
-DECODE_IPS=$(oc get pods -l app=vllm-decode -n "$NS" \
+DECODE_IPS=$(oc get pods -l "${DECODE_SELECTOR:-app=vllm-decode}" -n "$NS" \
     -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{":"}{.status.podIP}{","}{end}' \
     2>/dev/null | sed 's/,$//')
 
-REMOTE_ENV="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME"
+REMOTE_ENV="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME ROUTING_MODE=$ROUTING_MODE EPP_URL=$EPP_URL EPP_RELEASE_NAME=$EPP_RELEASE_NAME EPP_SERVICE_NAME=$EPP_SERVICE_NAME EPP_METRICS_URL=$EPP_METRICS_URL"
+REMOTE_ENV="$REMOTE_ENV BASELINE_URL=$BASELINE_URL DISAGG_URL=$DISAGG_URL DISAGG_D1_URL=$DISAGG_D1_URL DISAGG_D2_URL=$DISAGG_D2_URL"
+for variable in RUNS WARMUP MAX_TOKENS METRICS_ENDPOINTS; do
+    if [[ -n "${!variable:-}" ]]; then
+        REMOTE_ENV="$REMOTE_ENV $variable=${!variable}"
+    fi
+done
 [ -n "$PREFILL_IPS" ] && REMOTE_ENV="$REMOTE_ENV PODS_VLLM_PREFILL=$PREFILL_IPS"
 [ -n "$DECODE_IPS" ] && REMOTE_ENV="$REMOTE_ENV PODS_VLLM_DECODE=$DECODE_IPS"
 [ -n "${SIM:-}" ] && REMOTE_ENV="$REMOTE_ENV SIM=$SIM"

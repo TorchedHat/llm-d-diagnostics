@@ -5,14 +5,17 @@ Tests build_prompt, TypedCSVWriter, and write_run_info.
 
 import json
 import os
+import runpy
 import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from typing import TypedDict
 
+import client
 from client import RequestResult, build_prompt
 from schemas import TypedCSVWriter
 
@@ -242,6 +245,46 @@ class TestWriteRunInfo(unittest.TestCase):
                 loaded = json.load(f)
             self.assertIn("exp1", loaded["experiments"])
             self.assertIn("exp2", loaded["experiments"])
+
+
+class TestRouting(unittest.TestCase):
+
+    def test_epp_removes_manual_target_case_insensitively(self):
+        url = "http://router/v1/completions"
+        extra = {"X-Prefiller-Host-Port": "prefill:8000", "Authorization": "test"}
+        with patch.object(client, "EPP_URL", url):
+            headers = client.request_headers(url + "/", extra)
+        self.assertEqual(headers, {"Content-Type": "application/json", "Authorization": "test"})
+        self.assertIn("X-Prefiller-Host-Port", extra)
+
+    def test_manual_target_is_preserved(self):
+        extra = {"x-prefiller-host-port": "prefill:8000"}
+        with patch.object(client, "EPP_URL", "http://router/v1/completions"):
+            headers = client.request_headers("http://decode:8000/v1/completions", extra)
+        self.assertEqual(headers["x-prefiller-host-port"], "prefill:8000")
+
+    def test_pinned_epp_merges_headers_without_manual_target(self):
+        url = "http://router/v1/completions"
+        conn = client.PinnedConnection(url, extra_headers={"x-prefiller-host-port": "p1:8000"})
+        with patch.object(client, "EPP_URL", url):
+            headers = conn._merge_headers({"X-Prefiller-Host-Port": "p2:8000"})
+        self.assertEqual(headers, {"Content-Type": "application/json"})
+
+    def test_send_disagg_uses_epp_without_manual_header(self):
+        url = "http://router/v1/completions"
+        with patch.object(client, "ROUTING_MODE", "epp"), patch.object(client, "EPP_URL", url), \
+                patch.object(client, "send_request") as send:
+            client.send_disagg("http://decode/v1/completions", "hello", 5)
+        send.assert_called_once_with(url, "hello", 5, extra_headers={})
+
+    def test_epp_mode_keeps_comparison_endpoints_manual(self):
+        overrides = {"ROUTING_MODE": "epp", "EPP_URL": "http://router/v1/completions"}
+        with patch.dict(os.environ, overrides):
+            for name in ("DISAGG_URL", "DISAGG_D1_URL", "DISAGG_D2_URL"):
+                os.environ.pop(name, None)
+            config = runpy.run_path(client.__file__)
+        for name in ("DISAGG_URL", "DISAGG_D1_URL", "DISAGG_D2_URL"):
+            self.assertNotEqual(config[name], overrides["EPP_URL"])
 
 
 if __name__ == "__main__":

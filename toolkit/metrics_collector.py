@@ -14,7 +14,7 @@ Usage:
     COLLECT_DURATION=60 python3 metrics_collector.py
 
     # Custom endpoints and interval
-    METRICS_ENDPOINTS="prefill=http://vllm-prefill-svc:8100,decode=http://vllm-decode-direct-svc:8001" \
+    METRICS_ENDPOINTS="prefill=http://vllm-prefill-svc:8000,decode=http://vllm-decode-direct-svc:8001" \
     SAMPLE_INTERVAL=1 \
     python3 metrics_collector.py
 
@@ -36,6 +36,7 @@ import json
 import os
 import re
 import signal
+import ssl
 import sys
 import threading
 import time
@@ -116,6 +117,7 @@ CSV_FIELDS = [
     "flops",
     # Process
     "cpu_seconds", "rss_bytes",
+    "epp_scheduler_e2e_sum_seconds", "epp_scheduler_e2e_count",
 ]
 
 
@@ -127,25 +129,41 @@ def parse_endpoints():
         for pair in raw.split(","):
             name, url = pair.strip().split("=", 1)
             endpoints[name.strip()] = url.strip()
+        if env("EPP_URL") and "epp" not in endpoints:
+            release = env("EPP_RELEASE_NAME", "llm-d-epp")
+            service = env("EPP_SERVICE_NAME", f"{release}-epp")
+            endpoints["epp"] = env("EPP_METRICS_URL", f"http://{service}:9090")
         return endpoints
 
     # Auto-detect: use short service names (works within the same namespace).
-    # vLLM listens on 8100 (prefill) and 8001 (decode, behind sidecar on 8000).
-    # We scrape the vLLM port directly, not the sidecar.
-    return {
-        "prefill": "http://vllm-prefill-svc:8100",
+    # The prefill Service is headless, so DNS returns pod IPs and clients use
+    # the pod port directly. Inference-sim listens on 8100; vLLM listens on 8000.
+    endpoints = {
+        "prefill": f"http://vllm-prefill-svc:{8100 if env('SIM') == '1' else 8000}",
         "decode": "http://vllm-decode-direct-svc:8001",
     }
+    if env("EPP_URL"):
+        release = env("EPP_RELEASE_NAME", "llm-d-epp")
+        service = env("EPP_SERVICE_NAME", f"{release}-epp")
+        endpoints["epp"] = env("EPP_METRICS_URL", f"http://{service}:9090")
+    return endpoints
 
 
 def scrape_metrics(url, timeout=5):
-    """Scrape /metrics from a vLLM endpoint. Returns raw text or None."""
+    """Scrape /metrics from a vLLM or EPP endpoint. Returns raw text or None."""
     parsed = urlparse(url)
     host = parsed.hostname
-    port = parsed.port or 80
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        conn = http.client.HTTPConnection(host, port, timeout=timeout)
-        conn.request("GET", "/metrics")
+        if parsed.scheme == "https":
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout,
+                                               context=ssl.create_default_context())
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        path = parsed.path.rstrip("/")
+        if not path.endswith("/metrics"):
+            path += "/metrics"
+        conn.request("GET", path)
         resp = conn.getresponse()
         if resp.status == 200:
             body = resp.read().decode("utf-8", errors="replace")
@@ -239,6 +257,10 @@ def extract_row(endpoint_name, metrics):
         # Process
         "cpu_seconds": g("process_cpu_seconds_total"),
         "rss_bytes": g("process_resident_memory_bytes"),
+        "epp_scheduler_e2e_sum_seconds": g(
+            "llm_d_epp_scheduler_e2e_duration_seconds_sum"),
+        "epp_scheduler_e2e_count": g(
+            "llm_d_epp_scheduler_e2e_duration_seconds_count"),
     }
 
 

@@ -10,9 +10,17 @@ to a specific cluster.
 | `NS` | `default` | Kubernetes namespace |
 | `MODEL` | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | Model name for API requests |
 | `SIM` | (unset) | Set to `1` for inference-sim mode (HTTP, no TLS) |
-| `BASELINE_URL` | `http://vllm-prefill-svc:8100/v1/completions` | Prefill direct endpoint |
+| `BASELINE_URL` | `http://vllm-prefill-svc:8000/v1/completions` (`SIM=1`: port 8100) | Prefill direct endpoint |
 | `DISAGG_D1_URL` | `http://vllm-decode-svc:8000/v1/completions` | Decode-1 through sidecar (scheme follows `SIDECAR_SCHEME`) |
 | `DISAGG_D2_URL` | `http://vllm-decode-2-svc:8000/v1/completions` | Decode-2 through sidecar (scheme follows `SIDECAR_SCHEME`) |
+| `EPP_URL` | (unset) | Full OpenAI completions URL exposed by the Gateway HTTPRoute; enables EPP comparison arms |
+| `ROUTING_MODE` | `manual` | `manual` or `epp`; selects the route for exp4 and `send_disagg()`. Comparison experiments always retain their manual controls. |
+| `EPP_GATEWAY_NAME` | (required to install EPP) | Existing InferencePool-capable Gateway to attach the HTTPRoute to |
+| `EPP_GATEWAY_NAMESPACE` | `$NS` | Namespace containing that Gateway |
+| `EPP_ROUTER_VERSION` | `v0.11.0` | llm-d-router chart and image version installed by `deploy-epp.sh` |
+| `EPP_RELEASE_NAME` | `llm-d-epp` | Helm release name |
+| `EPP_SERVICE_NAME` | `llm-d-epp-epp` | In-cluster EPP Service name derived from `EPP_RELEASE_NAME` |
+| `EPP_METRICS_URL` | `http://llm-d-epp-epp:9090` | EPP Prometheus endpoint scraped when `EPP_URL` is set |
 | `RUNS` | `20` | Measured runs per config |
 | `WARMUP` | `3` | Warmup requests (discarded) |
 | `MAX_TOKENS` | `20` | Max completion tokens |
@@ -119,11 +127,52 @@ export NS=my-namespace
 export MODEL="my-org/my-model"
 export DATA_DIR="clusters/my-cluster/data"
 export STORAGE_CLASS="my-rwx-storage-class"  # must support ReadWriteMany
-export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8100"
+export PREFILL_HOST="vllm-prefill-svc.${NS}.svc.cluster.local:8000"
 ```
 
 Source it before running experiments directly, or let `run.sh` source it
 automatically.
+
+## EPP integration
+
+The EPP chart attaches an `HTTPRoute` to a Gateway that the cluster operator
+has already installed and configured for `InferencePool` backends. Set
+`EPP_GATEWAY_NAME` and `EPP_GATEWAY_NAMESPACE`, then install and remove the
+namespaced router release with:
+
+```bash
+./scripts/deploy-epp.sh clusters/my-cluster
+./scripts/undeploy-epp.sh clusters/my-cluster
+```
+
+The installer checks Gateway readiness, model pod labels, namespace permissions,
+and a server dry-run of the rendered resources before installation. The dry-run
+also checks RBAC escalation and binding restrictions. It pins llm-d-router/EPP to `v0.11.0` by default,
+matching the current disaggregation sidecar. The EPP pool selects only model
+pods labeled `llm-d-diagnostics.ai/model-server=true`, uses pod port 8000 for
+both roles, and requests P/D disaggregation with the always-disagg decider. The
+prefill Service is headless, so clients resolve pod IPs and connect directly to
+port 8000. Inference-sim uses port 8100.
+
+After installation, take the Gateway address from its status and set
+`EPP_URL` to that address plus `/v1/completions`. With `EPP_URL` configured,
+the latency, decomposition, throughput, isolation, saturation, mixed-workload,
+and sequence-sweep experiments add a separate `DISAGG-EPP`/`E-EPP-gateway`
+arm alongside their manual-routing controls. `exp8` adds a cache-locality phase
+through the Gateway, and `exp14` measures manual-versus-EPP routing under
+concurrency. `exp4` uses manual headers by default; set `ROUTING_MODE=epp` to
+send its in-cluster fault probes through the Gateway. The metrics collector
+saves raw EPP snapshots and samples the
+`llm_d_epp_scheduler_e2e_duration_seconds` histogram sum/count; it does not
+estimate histogram percentiles by subtracting summary quantiles.
+
+The upstream handler can serve on decode alone when no prefill endpoint is
+available. Check NIXL transfer counters during fault tests to identify this
+fallback; an HTTP 200 response alone does not establish that KV transfer occurred.
+
+The client-vs-manual latency difference includes Gateway proxying and EPP
+scheduling. The EPP histogram measures scheduler latency only. Keep both when
+reporting router overhead.
 
 ## Security notes
 

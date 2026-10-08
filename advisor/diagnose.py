@@ -347,7 +347,8 @@ def _check_probe_health(ns, model, decode_url="", prefill_host="") -> list[Issue
     """Send a test disagg request to verify end-to-end pipeline."""
     scheme = os.environ.get("SIDECAR_SCHEME", "http")
     url = decode_url or f"{scheme}://vllm-decode-svc:8000/v1/completions"
-    host = prefill_host or f"vllm-prefill-svc.{ns}.svc.cluster.local:8100"
+    prefill_port = 8100 if os.environ.get("SIM") == "1" else 8000
+    host = prefill_host or f"vllm-prefill-svc.{ns}.svc.cluster.local:{prefill_port}"
     headers = {"x-prefiller-host-port": host}
     r = _send_probe(url, model, extra_headers=headers)
     if r["status"] != 200:

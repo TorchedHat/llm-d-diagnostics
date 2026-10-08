@@ -18,12 +18,9 @@
 #   - NIXL side channel on all pods (VLLM_NIXL_SIDE_CHANNEL_HOST/PORT)
 #   - llm-d.ai/role labels for ecosystem compatibility
 #   - UCX_TLS: ^cuda_ipc (exclude CUDA IPC for cross-pod TCP transfers)
+#   - P/D model pods expose a common HTTP port 8000 for EPP and direct clients.
 #
-# What we don't use (requires EPP/Gateway/full stack):
-#   - EPP, InferencePool, InferenceModel CRDs
-#   - Gateway API, HTTPRoute
-#   - ModelService CRD
-#   - Redis/LMCache (MultiConnector)
+# Install EPP/Gateway routing separately with scripts/deploy-epp.sh.
 #
 # Pod discovery:
 #   oc get pods -l app=vllm-decode -n <namespace>
@@ -265,8 +262,8 @@ spec:
     app: vllm-prefill
   ports:
   - name: http
-    port: 8100
-    targetPort: 8100
+    port: 8000
+    targetPort: 8000
     protocol: TCP
   - name: nixl
     port: $NIXL_PORT
@@ -302,6 +299,7 @@ spec:
       labels:
         app: vllm-prefill
         llm-d.ai/role: prefill
+        llm-d-diagnostics.ai/model-server: "true"
         app.kubernetes.io/part-of: vllm-disagg
     spec:
 ${GPU_POD_RESOURCE_CLAIMS}
@@ -316,7 +314,7 @@ ${GPU_POD_RESOURCE_CLAIMS}
         - --host
         - "0.0.0.0"
         - --port
-        - "8100"
+        - "8000"
         - --dtype
         - \$(DTYPE)
         - --gpu-memory-utilization
@@ -343,7 +341,7 @@ ${GPU_POD_RESOURCE_CLAIMS}
         - configMapRef:
             name: vllm-model-config
         ports:
-        - containerPort: 8100
+        - containerPort: 8000
           name: http
           protocol: TCP
         - containerPort: $NIXL_PORT
@@ -362,7 +360,7 @@ ${GPU_RESOURCE_LIMIT:+$GPU_RESOURCE_LIMIT
         startupProbe:
           httpGet:
             path: /health
-            port: 8100
+            port: 8000
           failureThreshold: 60
           initialDelaySeconds: 15
           periodSeconds: 30
@@ -370,12 +368,12 @@ ${GPU_RESOURCE_LIMIT:+$GPU_RESOURCE_LIMIT
         readinessProbe:
           httpGet:
             path: /health
-            port: 8100
+            port: 8000
           failureThreshold: 3
           periodSeconds: 5
         livenessProbe:
           tcpSocket:
-            port: 8100
+            port: 8000
           failureThreshold: 3
           periodSeconds: 5
         lifecycle:
@@ -488,6 +486,7 @@ spec:
       labels:
         app: vllm-decode
         llm-d.ai/role: decode
+        llm-d-diagnostics.ai/model-server: "true"
         app.kubernetes.io/part-of: vllm-disagg
     spec:
 ${GPU_POD_RESOURCE_CLAIMS}
@@ -780,7 +779,7 @@ echo "    oc get pods -l llm-d.ai/role=prefill -n $NS"
 echo "    oc get pods -l llm-d.ai/role=decode -n $NS"
 echo ""
 echo "  Services:"
-echo "    vllm-prefill-svc:8100        (prefill, headless)"
+echo "    vllm-prefill-svc:8000        (prefill, headless)"
 echo "    vllm-decode-svc:8000         (decode via sidecar, headless)"
 echo "    vllm-decode-direct-svc:8001  (decode bypass sidecar, headless)"
 echo "    NIXL side channel:$NIXL_PORT (on all pods)"
@@ -804,7 +803,8 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
     READY=0
     for deployment in vllm-prefill vllm-decode; do
         replicas="$(oc get deployment "$deployment" -n "$NS" -o jsonpath='{.spec.replicas}')"
-        # Old Ready pods can mask a failing new ReplicaSet during an image rollout.
+        # Check deployment rollout status so Ready pods from an old
+        # ReplicaSet cannot mask a failing image rollout.
         if oc rollout status "deployment/$deployment" -n "$NS" --timeout=1s >/dev/null 2>&1; then
             READY=$((READY + replicas))
         fi

@@ -16,6 +16,8 @@ spec:
     metadata:
       labels:
         app: vllm-decode
+        llm-d.ai/role: decode
+        llm-d-diagnostics.ai/model-server: "true"
         app.kubernetes.io/part-of: vllm-disagg
     spec:
       resourceClaims:

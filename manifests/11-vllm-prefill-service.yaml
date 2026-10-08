@@ -11,8 +11,8 @@ spec:
     app: vllm-prefill
   ports:
   - name: http
-    port: 8100
-    targetPort: 8100
+    port: 8000
+    targetPort: 8000
     protocol: TCP
   - name: nixl
     port: 5557

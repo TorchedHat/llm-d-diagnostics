@@ -104,7 +104,8 @@ class DisaggProber:
         self._baseline_ms: float = 0.0
         scheme = os.environ.get("SIDECAR_SCHEME", "http")
         self.disagg_url = decode_url or f"{scheme}://vllm-decode-svc:8000/v1/completions"
-        self.prefill_host = prefill_host or f"vllm-prefill-svc.{namespace}.svc.cluster.local:8100"
+        prefill_port = 8100 if os.environ.get("SIM") == "1" else 8000
+        self.prefill_host = prefill_host or f"vllm-prefill-svc.{namespace}.svc.cluster.local:{prefill_port}"
 
     def probe(self) -> ProbeResult:
         """Send one synthetic disagg request and evaluate health."""

@@ -81,7 +81,10 @@ def scrape_pod_metrics(pod, namespace):
     Returns the raw metrics text, or empty string on failure.
     """
     ip = pod.get("ip", "")
-    port = 8100 if "prefill" in pod.get("role", pod.get("name", "")) else 8001
+    is_prefill = "prefill" in pod.get("role", pod.get("name", ""))
+    images = pod.get("images") or [pod.get("image", "")]
+    is_sim = any("llm-d-inference-sim" in image for image in images)
+    port = (8100 if is_sim else 8000) if is_prefill else 8001
 
     if ip:
         try:

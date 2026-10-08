@@ -7,9 +7,11 @@ All configuration via environment variables:
     SIM             Set to 1 for inference-sim mode (HTTP, fake model)
     MODEL           Model name (default: TinyLlama/TinyLlama-1.1B-Chat-v1.0)
     NS              Kubernetes namespace (default: default)
-    BASELINE_URL    Prefill direct URL (default: http://vllm-prefill-svc:8100/v1/completions)
+    BASELINE_URL    Prefill direct URL (default: vLLM :8000, SIM :8100)
     SIDECAR_SCHEME  Sidecar listener scheme (default: http)
     DISAGG_URL      Decode via sidecar (default: http://vllm-decode-svc:8000/v1/completions)
+    EPP_URL         Optional OpenAI completions URL exposed by an HTTPRoute
+    ROUTING_MODE    manual or epp; selects the route for send_disagg and fault probes
     DECODE_DIRECT_URL  Decode bypass sidecar (default: http://vllm-decode-direct-svc:8001/v1/completions)
 
 Per-pod URLs (by pod IP):
@@ -46,7 +48,12 @@ def env(name, default):
 
 SIM = env("SIM", "") == "1"
 NS = env("NS", "default")
+_PREFILL_POD_PORT = 8100 if SIM else 8000
 SIDECAR_SCHEME = env("SIDECAR_SCHEME", "http")
+ROUTING_MODE = env("ROUTING_MODE", "manual").lower()
+EPP_URL = env("EPP_URL", "").strip()
+if ROUTING_MODE not in {"manual", "epp"}:
+    raise ValueError("ROUTING_MODE must be 'manual' or 'epp'")
 if SIDECAR_SCHEME not in {"http", "https"}:
     raise ValueError("SIDECAR_SCHEME must be 'http' or 'https'")
 
@@ -57,7 +64,7 @@ else:
     MODEL = env("MODEL", env("MODEL_NAME", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"))
     _DECODE_PORT = 8000
 
-BASELINE_URL = env("BASELINE_URL", "http://vllm-prefill-svc:8100/v1/completions")
+BASELINE_URL = env("BASELINE_URL", f"http://vllm-prefill-svc:{_PREFILL_POD_PORT}/v1/completions")
 DISAGG_URL = env("DISAGG_URL", f"{SIDECAR_SCHEME}://vllm-decode-svc:{_DECODE_PORT}/v1/completions")
 DECODE_DIRECT_URL = env("DECODE_DIRECT_URL", "http://vllm-decode-direct-svc:8001/v1/completions")
 
@@ -73,8 +80,41 @@ def decode_direct_url_by_ip(ip):
     return f"http://{ip}:8001/v1/completions"
 
 def prefill_pod_url_by_ip(ip):
-    """URL for a specific prefill pod by IP."""
-    return f"http://{ip}:8100/v1/completions"
+    """URL for a specific prefill pod (GPU deployments use port 8000)."""
+    return f"http://{ip}:{_PREFILL_POD_PORT}/v1/completions"
+
+def prefill_pod_host_port(ip):
+    """Routing-header target for a specific prefill pod."""
+    return f"{ip}:{_PREFILL_POD_PORT}"
+
+def epp_enabled():
+    """Whether an EPP Gateway endpoint has been configured."""
+    return bool(EPP_URL)
+
+def manual_disagg_headers(prefill_host=None):
+    """Build the explicit prefill header used by the manual-routing control."""
+    return {"x-prefiller-host-port": prefill_host or PREFILL_HOST}
+
+
+def request_headers(url, extra_headers=None):
+    """Keep manual prefill targets out of requests scheduled by EPP."""
+    headers = {"Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    if EPP_URL and url.rstrip("/") == EPP_URL.rstrip("/"):
+        headers = {key: value for key, value in headers.items()
+                   if key.lower() != "x-prefiller-host-port"}
+    return headers
+
+
+def http_error(status, body):
+    """Preserve JSON and plain-text errors from model servers and Gateways."""
+    if status < 400:
+        return ""
+    detail = body.get("error") or body.get("raw", "")
+    if isinstance(detail, dict):
+        detail = detail.get("message", detail)
+    return f"HTTP {status}: {str(detail)[:500]}".rstrip(": ")
 
 def detect_transport():
     """Auto-detect the interconnect transport type.
@@ -239,7 +279,7 @@ def discover_pod_ips(label, namespace=None):
 DISAGG_D1_URL = env("DISAGG_D1_URL", DISAGG_URL)
 DISAGG_D2_URL = env("DISAGG_D2_URL", DISAGG_URL)
 
-PREFILL_HOST = env("PREFILL_HOST", f"vllm-prefill-svc.{NS}.svc.cluster.local:8100")
+PREFILL_HOST = env("PREFILL_HOST", f"vllm-prefill-svc.{NS}.svc.cluster.local:{_PREFILL_POD_PORT}")
 PREFILL_HEADER = f"x-prefiller-host-port: {PREFILL_HOST}"
 DATA_DIR = env("DATA_DIR", "data")
 WARMUP = int(env("WARMUP", "3"))
@@ -339,9 +379,7 @@ def send_request(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         "max_tokens": max_tokens,
     })
 
-    headers = {"Content-Type": "application/json"}
-    if extra_headers:
-        headers.update(extra_headers)
+    headers = request_headers(url, extra_headers)
 
     start = time.monotonic()
     try:
@@ -382,6 +420,7 @@ def send_request(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             body=body,
+            error=http_error(response.status, body),
         )
 
     except Exception as e:
@@ -397,11 +436,12 @@ def send_request(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
 
 
 def send_disagg(url, prompt, max_tokens=MAX_TOKENS):
-    """Send a disaggregated request (with prefill routing header)."""
-    return send_request(
-        url, prompt, max_tokens,
-        extra_headers={"x-prefiller-host-port": PREFILL_HOST},
-    )
+    """Send via the configured manual or EPP disaggregation route."""
+    target = EPP_URL if ROUTING_MODE == "epp" else url
+    headers = {} if ROUTING_MODE == "epp" else manual_disagg_headers()
+    if ROUTING_MODE == "epp" and not EPP_URL:
+        raise ValueError("ROUTING_MODE=epp requires EPP_URL")
+    return send_request(target, prompt, max_tokens, extra_headers=headers)
 
 
 def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
@@ -429,9 +469,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         "stream": True,
     })
 
-    headers = {"Content-Type": "application/json"}
-    if extra_headers:
-        headers.update(extra_headers)
+    headers = request_headers(url, extra_headers)
 
     start = time.monotonic()
     try:
@@ -447,6 +485,14 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         response = conn.getresponse()
 
         status = response.status
+        if status != 200:
+            body = {"raw": response.read().decode("utf-8", errors="replace")}
+            conn.close()
+            return RequestResult(
+                ttft_ms=0, total_ms=round((time.monotonic() - start) * 1000, 2),
+                status=status, prompt_tokens=0, completion_tokens=0,
+                body=body, error=http_error(status, body),
+            )
         token_times = []
         prompt_tokens = 0
         last_chunk = {}
@@ -567,11 +613,10 @@ class PinnedConnection:
 
     def _merge_headers(self, extra_headers=None):
         """Merge constructor headers with per-call headers."""
-        headers = {"Content-Type": "application/json"}
-        headers.update(self.extra_headers)
+        headers = dict(self.extra_headers)
         if extra_headers:
             headers.update(extra_headers)
-        return headers
+        return request_headers(self.url, headers)
 
     def send(self, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         """Send a completion request, reusing the persistent connection.
@@ -613,6 +658,7 @@ class PinnedConnection:
                     prompt_tokens=usage.get("prompt_tokens", 0),
                     completion_tokens=usage.get("completion_tokens", 0),
                     body=body,
+                    error=http_error(response.status, body),
                 )
 
             except (ConnectionResetError, BrokenPipeError,
@@ -656,6 +702,13 @@ class PinnedConnection:
                 response = self._conn.getresponse()
 
                 status = response.status
+                if status != 200:
+                    body = {"raw": response.read().decode("utf-8", errors="replace")}
+                    return RequestResult(
+                        ttft_ms=0, total_ms=round((time.monotonic() - start) * 1000, 2),
+                        status=status, prompt_tokens=0, completion_tokens=0,
+                        body=body, error=http_error(status, body),
+                    )
                 token_times = []
                 prompt_tokens = 0
                 last_chunk = {}
@@ -805,6 +858,8 @@ def write_run_info(experiment, extra=None):
         "disagg_d1_url": DISAGG_D1_URL,
         "disagg_d2_url": DISAGG_D2_URL,
         "prefill_host": PREFILL_HOST,
+        "routing_mode": ROUTING_MODE,
+        "epp_url": EPP_URL,
         "warmup": WARMUP,
         "runs": RUNS,
         "max_tokens": MAX_TOKENS,
@@ -849,6 +904,8 @@ def print_config():
     progress(f"  Baseline: {BASELINE_URL}")
     progress(f"  Decode-1: {DISAGG_D1_URL}")
     progress(f"  Decode-2: {DISAGG_D2_URL}")
+    if EPP_URL:
+        progress(f"  EPP:      {EPP_URL} ({ROUTING_MODE} default route)")
     progress(f"  Warmup:   {WARMUP}  Runs: {RUNS}  Max tokens: {MAX_TOKENS}")
     progress(f"  Data dir: {DATA_DIR}")
     progress("")

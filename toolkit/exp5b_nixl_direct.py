@@ -38,6 +38,7 @@ from client import (
     discover_pod_ips,
     dot,
     env,
+    prefill_pod_host_port,
     print_config,
     progress,
     write_run_info,
@@ -172,7 +173,7 @@ def main():
     conn_d = PinnedConnection(
         decode_pod_url_by_ip(decode_ip),
         pod_name=decode_name,
-        extra_headers={"x-prefiller-host-port": f"{prefill_ip}:8100"},
+        extra_headers={"x-prefiller-host-port": prefill_pod_host_port(prefill_ip)},
     )
 
     progress(f"  D-config: {conn_d}")

@@ -33,6 +33,17 @@ DRY_RUN=server ./scripts/deploy.sh clusters/my-cluster
 Each experiment writes CSV data. The analyzer computes medians,
 confidence intervals, and flags data quality issues.
 
+### EPP / Gateway API mode
+
+For experiments through llm-d's Endpoint Picker, configure an existing
+Gateway that supports `InferencePool` backends, then install the router and
+HTTPRoute with `scripts/deploy-epp.sh`. Set `EPP_URL` in the cluster config to
+the Gateway's `/v1/completions` address. Experiments then add EPP as a separate
+arm beside manual-header routing; set `ROUTING_MODE=epp` to send exp4 fault
+probes through the Gateway as well. See
+[docs/configuration.md](docs/configuration.md#epp-integration) for RBAC,
+Gateway, and metrics requirements.
+
 ## Experiments
 
 | Command | What it measures |
@@ -45,7 +56,8 @@ confidence intervals, and flags data quality issues.
 | `saturation` | QPS at which each topology collapses |
 | `mixed` | Realistic mixed-length workload comparison |
 | `fault` | Pod failure and recovery time (destructive) |
-| `prefix-cache` | KV cache hit rates across requests and pods |
+| `prefix-cache` | KV cache behavior across requests and pods, with an optional EPP-routed cache probe |
+| `overhead-load` | Routing overhead under concurrency, including EPP when configured |
 | `model-load` | Cold start time (kills pods) |
 | `kv-eviction` | KV cache persistence under delay and pressure |
 
