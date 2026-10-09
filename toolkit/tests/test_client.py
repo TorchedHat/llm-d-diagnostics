@@ -246,6 +246,22 @@ class TestWriteRunInfo(unittest.TestCase):
             self.assertIn("exp1", loaded["experiments"])
             self.assertIn("exp2", loaded["experiments"])
 
+    def test_records_toolkit_commit(self):
+        # The two tests above only exercise json; this one calls write_run_info.
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(client, "DATA_DIR", tmpdir), \
+                patch.object(client, "detect_transport", return_value="test"):
+            with patch.dict(os.environ, {"TOOLKIT_COMMIT": "abc123def456"}):
+                client.write_run_info("exp1", {"arm": "A"})
+            with open(os.path.join(tmpdir, "run-info.json")) as f:
+                loaded = json.load(f)
+            self.assertEqual(loaded["toolkit"]["toolkit_commit"], "abc123def456")
+            self.assertEqual(loaded["experiments"]["exp1"]["arm"], "A")
+        # Without run.sh, from a checkout: the checkout's own commit.
+        with patch.dict(os.environ, {"TOOLKIT_COMMIT": ""}):
+            commit = client.toolkit_commit()
+        self.assertRegex(commit, r"^([0-9a-f]{12}(-dirty)?|unknown)$")
+
 
 class TestRouting(unittest.TestCase):
 

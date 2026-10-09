@@ -34,6 +34,7 @@ import http.client
 import json
 import os
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -131,7 +132,6 @@ def detect_transport():
     if "rc" in ucx_tls or "ud" in ucx_tls or "dc" in ucx_tls:
         # Distinguish RoCE from InfiniBand via device type
         try:
-            import subprocess
             result = subprocess.run(
                 ["ls", "/sys/class/infiniband/"],
                 capture_output=True, text=True, timeout=5,
@@ -160,7 +160,6 @@ def detect_transport():
 
 def _discover_via_oc(label, ns):
     """Discover pods using `oc` CLI (works outside the cluster)."""
-    import subprocess
     result = subprocess.run(
         ["oc", "get", "pods", "-l", label, "-n", ns,
          "-o", "jsonpath={range .items[?(@.status.phase=='Running')]}"
@@ -967,7 +966,6 @@ def oc(*args, timeout=60):
     access.  Consolidates the subprocess pattern that was previously
     duplicated across advisor modules and _discover_via_oc above.
     """
-    import subprocess
     r = subprocess.run(
         ["oc", *list(args)], capture_output=True, text=True, timeout=timeout,
     )
@@ -978,7 +976,6 @@ def oc(*args, timeout=60):
 
 def oc_safe(*args, timeout=60):
     """Run an ``oc`` CLI command, returning (stdout, stderr) without raising."""
-    import subprocess
     r = subprocess.run(
         ["oc", *list(args)], capture_output=True, text=True, timeout=timeout,
     )
@@ -986,6 +983,28 @@ def oc_safe(*args, timeout=60):
 
 
 # ── Progress output ──────────────────────────────────────────────────────────
+
+def toolkit_commit():
+    """The toolkit's git commit, with "-dirty" if tracked files differ from it.
+
+    run.sh sets TOOLKIT_COMMIT, since the copy in the pod has no git checkout;
+    runs straight from a checkout (the simulator tests) read it from git.
+    """
+    commit = env("TOOLKIT_COMMIT", "")
+    if commit:
+        return commit
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        head = subprocess.run(["git", "-C", here, "rev-parse", "--short=12", "HEAD"],
+                              capture_output=True, text=True, timeout=10)
+        if head.returncode != 0:
+            return "unknown"
+        status = subprocess.run(["git", "-C", here, "status", "--porcelain", "--untracked-files=no"],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return head.stdout.strip() + ("-dirty" if status.stdout.strip() else "")
+
 
 def write_run_info(experiment, extra=None):
     """Write or update DATA_DIR/run-info.json with toolkit config and timestamps.
@@ -1026,6 +1045,7 @@ def write_run_info(experiment, extra=None):
         "runs": RUNS,
         "max_tokens": MAX_TOKENS,
         "data_dir": DATA_DIR,
+        "toolkit_commit": toolkit_commit(),
         "python_version": platform.python_version(),
         "platform": platform.platform(),
     }

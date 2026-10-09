@@ -194,6 +194,14 @@ DECODE_IPS=$(oc get pods -l "${DECODE_SELECTOR:-app=vllm-decode}" -n "$NS" \
 
 REMOTE_ENV="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME ROUTING_MODE=$ROUTING_MODE EPP_URL=$EPP_URL EPP_RELEASE_NAME=$EPP_RELEASE_NAME EPP_SERVICE_NAME=$EPP_SERVICE_NAME EPP_METRICS_URL=$EPP_METRICS_URL"
 REMOTE_ENV="$REMOTE_ENV BASELINE_URL=$BASELINE_URL DISAGG_URL=$DISAGG_URL DISAGG_D1_URL=$DISAGG_D1_URL DISAGG_D2_URL=$DISAGG_D2_URL"
+# The copy in the pod has no git checkout, so the commit is read here and
+# forwarded; each run records it in run-info.json.
+if [[ -z "${TOOLKIT_COMMIT:-}" ]]; then
+    TOOLKIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+    if [[ "$TOOLKIT_COMMIT" != unknown && -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        TOOLKIT_COMMIT="$TOOLKIT_COMMIT-dirty"
+    fi
+fi
 # Every experiment parameter that is set locally is forwarded to the pod.
 # toolkit/tests/test_run_sh.py checks this list covers every env("...") the
 # toolkit reads, so a new parameter cannot be silently dropped.
@@ -215,8 +223,8 @@ EXPERIMENT_ENV_VARS="
     PREFILL_SELECTOR PRESSURE_PROMPTS_N PROMPT_LENGTHS PROMPT_TOKENS QPS
     QPS_LEVELS ROLLOUT_DURATION RUNS SAMPLE_INTERVAL SHORT_MAX SHORT_TOKENS
     SIDECAR_CONTAINER SIM SKIP_PHASES SLO_MULT STARTUP_TIMEOUT STREAMING
-    STREAM_TIMEOUT SWEEP_LENGTHS TEST_CLIENT TOTAL_REQUESTS TRIALS
-    VLLM_CONTAINER WARMUP WORKLOAD_TYPE
+    STREAM_TIMEOUT SWEEP_LENGTHS TEST_CLIENT TOOLKIT_COMMIT TOTAL_REQUESTS
+    TRIALS VLLM_CONTAINER WARMUP WORKLOAD_TYPE
 "
 for variable in $EXPERIMENT_ENV_VARS; do
     if [[ -n "${!variable:-}" ]]; then
