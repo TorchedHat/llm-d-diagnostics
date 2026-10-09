@@ -2533,6 +2533,56 @@ def analyze_exp16(data_dir):
     print()
 
 
+# ── Experiment 18: One-GPU Calibration ──────────────────────────────────────
+
+def analyze_exp18(data_dir):
+    """Experiment 18: fitted calibration coefficients and their quality."""
+    import json
+    path = os.path.join(data_dir, "calibration.json")
+    if not os.path.exists(path):
+        print("  calibration.json not found")
+        return
+    with open(path) as fh:
+        cal = json.load(fh)
+
+    def ms(key):
+        return f"{cal[key] * 1000:.2f} ms" if cal.get(key) is not None else "not measured"
+
+    print(f"  Model: {cal.get('model')}   measured {cal.get('measured_at')}")
+    print()
+    if "prefill_a_s_per_token" in cal:
+        print(f"  Prefill:  TTFT(s) = {ms('prefill_t0_s')} + {cal['prefill_a_s_per_token'] * 1e6:.2f} us"
+              f" x s + {cal['prefill_b_s_per_token2'] * 1e9:.4f} ns x s^2"
+              f"   (R^2 {cal['prefill_fit_r2']:.4f}, {len(cal['prefill_points'])} lengths)")
+    else:
+        print("  Prefill:  not measured")
+    if "decode_weight_s" in cal:
+        print(f"  Decode:   step(B, ctx) = {ms('decode_weight_s')} + B x "
+              f"({cal['decode_per_request_s'] * 1000:.3f} ms + "
+              f"{cal['decode_kv_s_per_token'] * 1e9:.2f} ns x ctx)   "
+              f"(R^2 {cal['decode_fit_r2']:.4f})")
+        for batch, ctx, step in cal["decode_points"]:
+            print(f"            B={batch:<4} ctx={ctx:<7.0f} {step * 1000:.2f} ms")
+    else:
+        print("  Decode:   not measured")
+    kv = cal.get("kv_capacity_tokens")
+    print(f"  KV cache: {kv} tokens" if kv is not None else "  KV cache: not measured")
+    theta = cal.get("overlap_theta")
+    if theta is not None:
+        print(f"  Overlap:  theta {theta:.2f} (0 = decode adds to the chunk, 1 = decode is free)")
+    else:
+        print("  Overlap:  not measured")
+    transfer = cal.get("transfer")
+    if transfer:
+        print(f"  Transfer: {transfer['alpha_s'] * 1000:.1f} ms + bytes / "
+              f"{transfer['bw_bytes_per_s'] / 1e9:.2f} GB/s")
+    else:
+        print("  Transfer: not included (run exp5b, pass TRANSFER_ALPHA_S, TRANSFER_BW_BYTES_PER_S)")
+    for warning in cal.get("warnings", []):
+        print(f"  WARNING: {warning}")
+    print()
+
+
 def main():
     data_dir = sys.argv[1] if len(sys.argv) > 1 else "data"
 
@@ -2556,6 +2606,7 @@ def main():
         ("Experiment 13: Saturation Ceiling", "exp13-results.csv", analyze_exp13),
         ("Experiment 14: Overhead Under Load", "exp14-results.csv", analyze_exp14),
         ("Experiment 16: Per-Token ITL Trace", "exp16-results.csv", analyze_exp16),
+        ("Experiment 18: One-GPU Calibration", "calibration.json", analyze_exp18),
     ]
 
     print("llm-d Diagnostics — Analysis")

@@ -23,6 +23,7 @@
 #     tput-sat      Saturation ceiling (high concurrency)
 #     overhead-load Overhead decomposition under concurrent load
 #     per-token     Per-token ITL trace (p99 ITL, longest pause)
+#     calibrate     One-GPU calibration: prefill, decode step, KV capacity, overlap
 #     fault         Fault tolerance (kills pods — destructive)
 #     model-load    Cold start time (kills pods — destructive)
 #
@@ -198,20 +199,23 @@ REMOTE_ENV="$REMOTE_ENV BASELINE_URL=$BASELINE_URL DISAGG_URL=$DISAGG_URL DISAGG
 # toolkit reads, so a new parameter cannot be silently dropped.
 EXPERIMENT_ENV_VARS="
     BASELINE_N BG_LOAD CACHE_DECAY_S CACHE_LENGTHS CACHE_PROMPT_TOKENS
-    COLLECT_DURATION CONCURRENCY CONCURRENCY_LEVELS CONFIGS CONV_RUNS
-    DECODE1_DEPLOY DECODE1_SELECTOR DECODE2_DEPLOY DECODE_DEPLOY
-    DECODE_DIRECT_URL DECODE_SELECTOR DECOMPOSE_PROMPT DEGRAD_LOSS_STEPS
-    DEGRAD_PROBES DURATION_S EVICTION_DELAYS EVICTION_RUNS
+    CALIBRATE_URL CHUNK_BUDGET COLLECT_DURATION CONCURRENCY
+    CONCURRENCY_LEVELS CONFIGS CONV_RUNS DECODE1_DEPLOY DECODE1_SELECTOR
+    DECODE2_DEPLOY DECODE_DEPLOY DECODE_DIRECT_URL DECODE_OUTPUT_TOKENS
+    DECODE_PROMPT_TOKENS DECODE_RUNS DECODE_SELECTOR DECOMPOSE_PROMPT
+    DEGRAD_LOSS_STEPS DEGRAD_PROBES DURATION_S EVICTION_DELAYS EVICTION_RUNS
     GPU_SAMPLE_INTERVAL HEAVY_MAX HEAVY_PROMPT_TOKENS IGNORE_EOS
     KEEPALIVE_RUNS KILL_AT_S KILL_DELAYS_MS KILL_REPEATS LIGHT_MAX
     LIGHT_PROMPT_TOKENS LOAD_DURATION LOAD_MODE LOAD_QPS LOAD_RUNS LONG_MAX
     LONG_PCT LONG_TOKENS MAX_TOKENS METRICS_ENDPOINTS METRICS_INTERVAL
-    MID_TRANSFER_PROMPT_TOKENS MODEL_NAME NETEM_DELAY_MS NETEM_LOSS_PCT
-    NETPOLICY_FILE OUTPUT_LENGTHS PARTITION_DURATIONS PARTITION_ISOLATED
-    PREFILL_DEPLOY PREFILL_SELECTOR PRESSURE_PROMPTS_N PROMPT_LENGTHS
-    PROMPT_TOKENS QPS QPS_LEVELS ROLLOUT_DURATION RUNS SAMPLE_INTERVAL
-    SHORT_MAX SHORT_TOKENS SIDECAR_CONTAINER SIM SLO_MULT STARTUP_TIMEOUT
-    STREAMING STREAM_TIMEOUT SWEEP_LENGTHS TEST_CLIENT TOTAL_REQUESTS TRIALS
+    METRICS_URL MID_TRANSFER_PROMPT_TOKENS MODEL_NAME NETEM_DELAY_MS
+    NETEM_LOSS_PCT NETPOLICY_FILE OUTPUT_LENGTHS OVERLAP_DECODERS
+    OVERLAP_OUTPUT_TOKENS OVERLAP_PROMPT_TOKENS OVERLAP_RUNS
+    PARTITION_DURATIONS PARTITION_ISOLATED PREFILL_DEPLOY PREFILL_RUNS
+    PREFILL_SELECTOR PRESSURE_PROMPTS_N PROMPT_LENGTHS PROMPT_TOKENS QPS
+    QPS_LEVELS ROLLOUT_DURATION RUNS SAMPLE_INTERVAL SHORT_MAX SHORT_TOKENS
+    SIDECAR_CONTAINER SIM SKIP_PHASES SLO_MULT STARTUP_TIMEOUT STREAMING
+    STREAM_TIMEOUT SWEEP_LENGTHS TEST_CLIENT TOTAL_REQUESTS TRIALS
     VLLM_CONTAINER WARMUP WORKLOAD_TYPE
 "
 for variable in $EXPERIMENT_ENV_VARS; do
@@ -311,6 +315,7 @@ run_experiment() {
         tput-sat|exp13) run_single "Saturation Ceiling" exp13_tput_sat.py ;;
         overhead-load|exp14) run_single "Overhead Under Load" exp14_overhead_load.py ;;
         per-token|exp16) run_single "Per-Token ITL Trace" exp16_per_token_trace.py ;;
+        calibrate|exp18) run_single "One-GPU Calibration" exp18_calibrate.py ;;
         *)
             echo "Unknown experiment: $1"
             return 1
@@ -390,7 +395,7 @@ case "$COMMAND" in
     seqlen|exp5|saturation|exp6|mixed|exp7|\
     prefix-cache|exp8|kv-eviction|exp10|\
     tput-seqlen|exp11|tput-outlen|exp12|tput-sat|exp13|overhead-load|exp14|\
-    per-token|exp16)
+    per-token|exp16|calibrate|exp18)
         run_experiment "$COMMAND"
         ;;
 
@@ -471,6 +476,7 @@ case "$COMMAND" in
         echo "  tput-sat        Saturation ceiling (high concurrency)"
         echo "  overhead-load   Overhead decomposition under load"
         echo "  per-token       Per-token ITL trace (p99 ITL, longest pause)"
+        echo "  calibrate       One-GPU calibration (prefill, decode step, KV, overlap)"
         echo "  fault           Fault tolerance (destructive)"
         echo "  model-load      Cold start time (destructive)"
         echo ""

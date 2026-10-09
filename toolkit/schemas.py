@@ -409,6 +409,21 @@ class Exp16Row(TypedDict):
     error: str
 
 
+class Exp18Row(TypedDict):
+    """One-GPU calibration (exp18): one row per measurement."""
+    experiment: str
+    phase: str
+    metric: str
+    param: str
+    run: str
+    value: str
+    unit: str
+    prompt_tokens_actual: str
+    status_code: str
+    detail: str
+    error: str
+
+
 # ── Typed CSV Writer ────────────────────────────────────────────────────────
 
 class TypedCSVWriter:

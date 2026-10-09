@@ -78,6 +78,20 @@ to a specific cluster.
 | `MAX_TOKENS` | `500` | exp16 | Output length |
 | `CONCURRENCY_LEVELS` | `1,4,32,64` | exp16 | Concurrency levels |
 | `ITL_SLO_MS` | `50` | exp16 analysis | Threshold for the share of gaps over the ITL target (read by `analyze.py`) |
+| `CALIBRATE_URL` | `BASELINE_URL` | exp18 | Completions URL of the one monolithic instance to calibrate |
+| `METRICS_URL` | derived from `CALIBRATE_URL` | exp18 | `/metrics` URL for `vllm:cache_config_info` |
+| `PREFILL_LENGTHS` | `256,512,1024,2048,4096` | exp18 | Prompt lengths for the prefill fit |
+| `PREFILL_RUNS` | `5` | exp18 | Requests per prompt length |
+| `DECODE_BATCHES` | `1,2,4,8,16` | exp18 | Batch sizes for the decode step fit (keep within `--max-num-seqs`) |
+| `DECODE_PROMPT_TOKENS` / `DECODE_OUTPUT_TOKENS` | `512,2048` / `128` | exp18 | Prompt lengths (two or more separate per-request overhead from KV reads) and output length for the decode step fit |
+| `DECODE_RUNS` | `3` | exp18 | Repeats per batch size |
+| `OVERLAP_DECODERS` | `8` | exp18 | Decoding requests during the overlap measurement |
+| `OVERLAP_PROMPT_TOKENS` | `2048` | exp18 | Injected prompt; keep it within one prefill chunk |
+| `OVERLAP_OUTPUT_TOKENS` / `OVERLAP_RUNS` | `256` / `3` | exp18 | Decoders' output length; repeats |
+| `CHUNK_BUDGET` | (unset) | exp18 | The server's `--max-num-batched-tokens`, recorded and checked against the injected prompt |
+| `KV_BYTES_PER_TOKEN` | (unset) | exp18 | Recorded into `calibration.json` |
+| `TRANSFER_ALPHA_S` / `TRANSFER_BW_BYTES_PER_S` | (unset) | exp18 | KV transfer fixed cost and bandwidth from exp5b, recorded into `calibration.json` |
+| `SKIP_PHASES` | (unset) | exp18 | Comma-separated phases to skip: `prefill,decode,kv,overlap` |
 
 Full list in [`toolkit/client.py`](../toolkit/client.py) and each experiment script.
 
