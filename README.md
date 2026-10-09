@@ -60,8 +60,11 @@ Gateway, and metrics requirements.
 | `overhead-load` | Routing overhead under concurrency, including EPP when configured |
 | `model-load` | Cold start time (kills pods) |
 | `kv-eviction` | KV cache persistence under delay and pressure |
+| `tput-outlen` | TTFT, ITL and total latency vs output length (streaming, exact output lengths; optional prompt and concurrency sweeps) |
+| `per-token` | Every inter-token gap under steady load: p99 ITL and the longest pause each request sees |
 
-Run `characterize` for all non-destructive experiments. Run `fault-test`
+Run `characterize` for the core non-destructive experiments (exp1, 1b, 2,
+3, 5-8 and 10); run the others by name. Run `fault-test`
 for destructive experiments (kills pods -- confirms before running).
 
 ## Advisory Tools
@@ -116,6 +119,13 @@ SIM=1 ./toolkit/run.sh clusters/my-sim latency
 Sim mode exercises the sidecar routing and measurement pipeline with
 canned responses. No real model, no KV cache, no NIXL transfer — the
 numbers don't reflect real inference.
+
+Without a cluster, `scripts/sim-smoke.sh` runs the streaming experiments
+(`tput-outlen`, `per-token`) against two local simulator
+processes with known latencies, and checks the measured TTFT, ITL and output
+lengths against them. CI runs it on every pull request. It checks the
+measurement plumbing only: there is no routing sidecar in that setup, so the
+P/D path is not exercised.
 
 The GPU deployment defaults use upstream vLLM `v0.31.0` with the llm-d
 Router disaggregation sidecar `v0.11.0`. The llm-d v0.10.0 release matrix

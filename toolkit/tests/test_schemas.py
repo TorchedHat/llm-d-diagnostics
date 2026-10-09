@@ -36,7 +36,9 @@ from schemas import (
     Exp9Row,
     Exp10Row,
     Exp11Row,
+    Exp12Row,
     Exp14Row,
+    Exp16Row,
     ModelLoadPhase,
     Priority,
     TypedCSVWriter,
@@ -65,7 +67,7 @@ class TestFieldsFor(unittest.TestCase):
         row_types = [
             Exp1Row, Exp1bRow, Exp2Row, Exp3Row, Exp4Row, Exp5Row, Exp5bRow,
             Exp6Row, Exp7Row, Exp7GpuRow, Exp8Row, Exp9Row, Exp10Row,
-            Exp11Row, Exp14Row,
+            Exp11Row, Exp12Row, Exp14Row, Exp16Row,
         ]
         for rt in row_types:
             fields = fields_for(rt)
@@ -75,6 +77,8 @@ class TestFieldsFor(unittest.TestCase):
         self.assertEqual(len(fields_for(Exp1Row)), 12)
         self.assertEqual(len(fields_for(Exp11Row)), 13)
         self.assertEqual(len(fields_for(Exp14Row)), 12)
+        self.assertEqual(len(fields_for(Exp12Row)), 18)
+        self.assertEqual(len(fields_for(Exp16Row)), 15)
 
 
 class TestConfigEnums(unittest.TestCase):
@@ -138,7 +142,7 @@ class TestTypedCSVWriterRoundTrip(unittest.TestCase):
     ROW_TYPES = [
         Exp1Row, Exp1bRow, Exp2Row, Exp3Row, Exp4Row, Exp5Row, Exp5bRow,
         Exp6Row, Exp7Row, Exp7GpuRow, Exp8Row, Exp9Row, Exp10Row,
-        Exp11Row, Exp14Row,
+        Exp11Row, Exp12Row, Exp14Row, Exp16Row,
     ]
 
     def test_round_trip_all_row_types(self):

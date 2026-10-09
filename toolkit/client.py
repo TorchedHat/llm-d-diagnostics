@@ -35,6 +35,7 @@ import json
 import os
 import ssl
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -337,6 +338,7 @@ class RequestResult:
     body: dict[str, Any] = field(default_factory=dict)  # full response JSON
     error: str = ""       # error message if request failed
     token_times: tuple[float, ...] = ()  # monotonic per-token timestamps (s from request start)
+    usage_completion_tokens: int = 0  # server-reported count (streaming, include_usage); 0 if unknown
 
     @property
     def ok(self) -> bool:
@@ -344,7 +346,7 @@ class RequestResult:
         return self.status == 200 and not self.error
 
 
-def send_request(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
+def send_request(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, ignore_eos=False):
     """Send a completion request with precise timing.
 
     Uses http.client directly (not urllib/requests) for precise timing.
@@ -373,11 +375,14 @@ def send_request(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         path = f"{path}?{parsed.query}"
     use_tls = parsed.scheme == "https"
 
-    payload = json.dumps({
+    body = {
         "model": MODEL,
         "prompt": prompt,
         "max_tokens": max_tokens,
-    })
+    }
+    if ignore_eos:
+        body["ignore_eos"] = True
+    payload = json.dumps(body)
 
     headers = request_headers(url, extra_headers)
 
@@ -444,11 +449,23 @@ def send_disagg(url, prompt, max_tokens=MAX_TOKENS):
     return send_request(target, prompt, max_tokens, extra_headers=headers)
 
 
-def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
+def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeout=30,
+                   ignore_eos=False, include_usage=False):
     """Send a streaming completion request with true TTFT measurement.
 
     Uses SSE (server-sent events) to measure the actual time to first
     generated token, and records per-token arrival times for ITL.
+
+    timeout is the socket timeout in seconds. It bounds each read,
+    including the wait for the first token, so raise it for long prompts
+    under load.
+
+    ignore_eos asks the server (vLLM, inference-sim) to keep generating
+    until max_tokens, so the output length is the one requested.
+
+    include_usage asks for the server's own token count in the final chunk
+    (usage_completion_tokens). completion_tokens counts streamed chunks with
+    text, which can be lower when a token decodes to an empty string.
 
     Returns:
         RequestResult with accurate ttft_ms, per-token token_times,
@@ -462,12 +479,17 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         path = f"{path}?{parsed.query}"
     use_tls = parsed.scheme == "https"
 
-    payload = json.dumps({
+    body = {
         "model": MODEL,
         "prompt": prompt,
         "max_tokens": max_tokens,
         "stream": True,
-    })
+    }
+    if ignore_eos:
+        body["ignore_eos"] = True
+    if include_usage:
+        body["stream_options"] = {"include_usage": True}
+    payload = json.dumps(body)
 
     headers = request_headers(url, extra_headers)
 
@@ -477,9 +499,9 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=30)
+            conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=timeout)
         else:
-            conn = http.client.HTTPConnection(host, port, timeout=30)
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
 
         conn.request("POST", path, body=payload, headers=headers)
         response = conn.getresponse()
@@ -495,6 +517,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
             )
         token_times = []
         prompt_tokens = 0
+        usage_completion = 0
         last_chunk = {}
 
         # Parse SSE stream line by line
@@ -517,6 +540,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
                     usage = chunk.get("usage")
                     if usage:
                         prompt_tokens = usage.get("prompt_tokens", 0)
+                        usage_completion = usage.get("completion_tokens", 0) or 0
                     last_chunk = chunk
                 except (json.JSONDecodeError, ValueError):
                     pass
@@ -535,6 +559,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
             completion_tokens=ct,
             body=last_chunk,
             token_times=tuple(token_times),
+            usage_completion_tokens=usage_completion,
         )
 
     except Exception as e:
@@ -550,6 +575,143 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
 
 
 # ── Pinned connection (protocol hygiene) ────────────────────────────────────
+
+LOAD_MODES = ("steady", "batch")
+
+# Distinct per process, so prompts never repeat across runs or experiments on
+# the same server (identical cache_bust tuples would hit the prefix cache).
+RUN_NONCE = f"{os.getpid()}-{time.time_ns()}"
+
+
+def route_throughput(config, seq):
+    """Return (url, headers, target tag) for request `seq` of a throughput config.
+
+    BASELINE goes to the prefill pod, EPP to the Gateway, DISAGG-1D to the
+    first decode sidecar, and DISAGG-2D alternates between the two by seq.
+    """
+    if config == "BASELINE":
+        return BASELINE_URL, None, "d1"
+    if config == "DISAGG-EPP":
+        return EPP_URL, None, "epp"
+    headers = manual_disagg_headers()
+    if config == "DISAGG-2D" and seq % 2 == 0:
+        return DISAGG_D2_URL, headers, "d2"
+    return DISAGG_D1_URL, headers, "d1"
+
+
+def closed_loop(workers, total, fn):
+    """Run fn(seq, inflight_at_start) `total` times on `workers` threads.
+
+    Each worker starts its next call as soon as its previous one returns, so
+    `workers` requests stay in flight (a steady closed loop), unlike sending
+    synchronized batches that drain to zero before the next batch starts.
+
+    seq is the start order (1-based). inflight_at_start is how many other
+    calls were running when this one started: the first wave starts at
+    0..workers-1, steady state is workers-1, and the last wave finishes
+    under a draining load. Analyses should drop the first and last
+    `workers` calls by seq.
+
+    If fn raises, no new calls start, and the first exception is re-raised
+    after the running calls finish (so a cell never continues silently with
+    fewer workers than its label says).
+
+    Returns fn's results in completion order.
+    """
+    lock = threading.Lock()
+    state = {"next": 0, "inflight": 0}
+    results = []
+    errors = []
+
+    def worker():
+        while True:
+            with lock:
+                if errors or state["next"] >= total:
+                    return
+                state["next"] += 1
+                seq = state["next"]
+                inflight = state["inflight"]
+                state["inflight"] += 1
+            try:
+                out = fn(seq, inflight)
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+                return
+            finally:
+                with lock:
+                    state["inflight"] -= 1
+            with lock:
+                results.append(out)
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(min(workers, total))]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    if errors:
+        raise errors[0]
+    return results
+
+
+def batched(batch_size, total, fn):
+    """Run fn(seq, inflight_at_start) `total` times in synchronized batches.
+
+    Each batch of `batch_size` calls starts together and the next batch
+    waits for the slowest call. This is how the older throughput
+    experiments drive load; inflight_at_start is the position in the batch.
+    If fn raises, the first exception is re-raised after the batch finishes.
+    Returns fn's results in start order.
+    """
+    results = []
+    seq = 0
+    while seq < total:
+        size = min(batch_size, total - seq)
+        threads, slots, errors = [], [None] * size, []
+        for i in range(size):
+            seq += 1
+
+            def call(i=i, s=seq, slots=slots, errors=errors):
+                try:
+                    slots[i] = fn(s, i)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads.append(threading.Thread(target=call, daemon=True))
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        if errors:
+            raise errors[0]
+        results.extend(slots)
+    return results
+
+
+def run_load(mode, concurrency, total, fn):
+    """Drive `total` calls of fn at `concurrency`: mode "steady" or "batch".
+
+    The request count is raised so the labelled concurrency is real: in
+    steady mode to at least 3x concurrency (a steady middle between the
+    first and last waves), in batch mode to a whole number of full batches.
+    Returns (results, effective_total).
+    """
+    if mode == "steady":
+        total = max(total, 3 * concurrency)
+        return closed_loop(concurrency, total, fn), total
+    if mode == "batch":
+        total = -(-max(total, concurrency) // concurrency) * concurrency
+        return batched(concurrency, total, fn), total
+    raise ValueError(f"unknown load mode {mode!r} (expected one of {LOAD_MODES})")
+
+
+def load_mode_from_env(default):
+    """Read LOAD_MODE and fail at import time on an unknown value."""
+    mode = env("LOAD_MODE", default)
+    if mode not in LOAD_MODES:
+        raise SystemExit(f"LOAD_MODE={mode!r}: expected one of {', '.join(LOAD_MODES)}")
+    return mode
+
 
 class PinnedConnection:
     """Persistent HTTP(S) connection to a specific pod.

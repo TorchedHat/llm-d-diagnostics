@@ -176,6 +176,9 @@ These override defaults in `client.py` and the experiment scripts:
 | `QPS` | 4 | exp7 | Target QPS for mixed workload |
 | `DURATION_S` | 60 | exp6,7 | Duration per QPS level |
 | `SIM` | (unset) | all | Set to `1` for inference-sim mode |
+| `LOAD_MODE` | batch / steady | exp12 / exp16 | `steady` keeps N requests in flight; see docs/configuration.md |
+| `IGNORE_EOS` | 1 | exp12, exp16 | Generate exactly the requested output length |
+| `STREAMING` | 1 | exp12 | Stream requests for true TTFT and ITL |
 
 ### Exp4-specific tuning
 

@@ -66,6 +66,18 @@ to a specific cluster.
 | `CACHE_PROMPT_TOKENS` | `500` | exp10 | Prompt length for eviction test |
 | `BG_LOAD` | `0` | exp10 | Background QPS during eviction test |
 | `PRESSURE_PROMPTS_N` | `20` | exp10 | Eviction pressure prompts |
+| `OUTPUT_LENGTHS` | `20,50,100,200` | exp12 | Output lengths to sweep |
+| `PROMPT_TOKENS` | `500` | exp12 | Prompt length(s), comma-separated |
+| `CONCURRENCY` | `8` | exp12 | Concurrency level(s), comma-separated |
+| `TOTAL_REQUESTS` | `24` (exp12), `50` (exp16) | exp11-14, exp16 | Requests per cell; raised so the labelled concurrency is reached |
+| `STREAMING` | `1` | exp12 | `1` = streaming (true TTFT and ITL); `0` = the older non-streaming runs |
+| `IGNORE_EOS` | `1` | exp12, exp16 | `1` = generate exactly the requested output length |
+| `LOAD_MODE` | `batch` (exp12), `steady` (exp16) | exp12, exp16 | `batch` = synchronized batches; `steady` = keep N requests in flight (closed loop) |
+| `STREAM_TIMEOUT` | `120` | exp12, exp16 | Socket timeout per read, seconds |
+| `PROMPT_TOKENS` | `1000` | exp16 | Prompt length |
+| `MAX_TOKENS` | `500` | exp16 | Output length |
+| `CONCURRENCY_LEVELS` | `1,4,32,64` | exp16 | Concurrency levels |
+| `ITL_SLO_MS` | `50` | exp16 analysis | Threshold for the share of gaps over the ITL target (read by `analyze.py`) |
 
 Full list in [`toolkit/client.py`](../toolkit/client.py) and each experiment script.
 

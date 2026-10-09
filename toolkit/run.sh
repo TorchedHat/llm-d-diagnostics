@@ -22,6 +22,7 @@
 #     tput-outlen   Throughput vs output length
 #     tput-sat      Saturation ceiling (high concurrency)
 #     overhead-load Overhead decomposition under concurrent load
+#     per-token     Per-token ITL trace (p99 ITL, longest pause)
 #     fault         Fault tolerance (kills pods — destructive)
 #     model-load    Cold start time (kills pods — destructive)
 #
@@ -192,18 +193,39 @@ DECODE_IPS=$(oc get pods -l "${DECODE_SELECTOR:-app=vllm-decode}" -n "$NS" \
 
 REMOTE_ENV="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME ROUTING_MODE=$ROUTING_MODE EPP_URL=$EPP_URL EPP_RELEASE_NAME=$EPP_RELEASE_NAME EPP_SERVICE_NAME=$EPP_SERVICE_NAME EPP_METRICS_URL=$EPP_METRICS_URL"
 REMOTE_ENV="$REMOTE_ENV BASELINE_URL=$BASELINE_URL DISAGG_URL=$DISAGG_URL DISAGG_D1_URL=$DISAGG_D1_URL DISAGG_D2_URL=$DISAGG_D2_URL"
-for variable in RUNS WARMUP MAX_TOKENS METRICS_ENDPOINTS; do
+# Every experiment parameter that is set locally is forwarded to the pod.
+# toolkit/tests/test_run_sh.py checks this list covers every env("...") the
+# toolkit reads, so a new parameter cannot be silently dropped.
+EXPERIMENT_ENV_VARS="
+    BASELINE_N BG_LOAD CACHE_DECAY_S CACHE_LENGTHS CACHE_PROMPT_TOKENS
+    COLLECT_DURATION CONCURRENCY CONCURRENCY_LEVELS CONFIGS CONV_RUNS
+    DECODE1_DEPLOY DECODE1_SELECTOR DECODE2_DEPLOY DECODE_DEPLOY
+    DECODE_DIRECT_URL DECODE_SELECTOR DECOMPOSE_PROMPT DEGRAD_LOSS_STEPS
+    DEGRAD_PROBES DURATION_S EVICTION_DELAYS EVICTION_RUNS
+    GPU_SAMPLE_INTERVAL HEAVY_MAX HEAVY_PROMPT_TOKENS IGNORE_EOS
+    KEEPALIVE_RUNS KILL_AT_S KILL_DELAYS_MS KILL_REPEATS LIGHT_MAX
+    LIGHT_PROMPT_TOKENS LOAD_DURATION LOAD_MODE LOAD_QPS LOAD_RUNS LONG_MAX
+    LONG_PCT LONG_TOKENS MAX_TOKENS METRICS_ENDPOINTS METRICS_INTERVAL
+    MID_TRANSFER_PROMPT_TOKENS MODEL_NAME NETEM_DELAY_MS NETEM_LOSS_PCT
+    NETPOLICY_FILE OUTPUT_LENGTHS PARTITION_DURATIONS PARTITION_ISOLATED
+    PREFILL_DEPLOY PREFILL_SELECTOR PRESSURE_PROMPTS_N PROMPT_LENGTHS
+    PROMPT_TOKENS QPS QPS_LEVELS ROLLOUT_DURATION RUNS SAMPLE_INTERVAL
+    SHORT_MAX SHORT_TOKENS SIDECAR_CONTAINER SIM SLO_MULT STARTUP_TIMEOUT
+    STREAMING STREAM_TIMEOUT SWEEP_LENGTHS TEST_CLIENT TOTAL_REQUESTS TRIALS
+    VLLM_CONTAINER WARMUP WORKLOAD_TYPE
+"
+for variable in $EXPERIMENT_ENV_VARS; do
     if [[ -n "${!variable:-}" ]]; then
+        # REMOTE_ENV is word-split by `env $REMOTE_ENV`: a space would break it.
+        if [[ "${!variable}" =~ [[:space:]] ]]; then
+            echo "ERROR: $variable must not contain spaces (got '${!variable}')" >&2
+            exit 1
+        fi
         REMOTE_ENV="$REMOTE_ENV $variable=${!variable}"
     fi
 done
 [ -n "$PREFILL_IPS" ] && REMOTE_ENV="$REMOTE_ENV PODS_VLLM_PREFILL=$PREFILL_IPS"
 [ -n "$DECODE_IPS" ] && REMOTE_ENV="$REMOTE_ENV PODS_VLLM_DECODE=$DECODE_IPS"
-[ -n "${SIM:-}" ] && REMOTE_ENV="$REMOTE_ENV SIM=$SIM"
-[ -n "${CONFIGS:-}" ] && REMOTE_ENV="$REMOTE_ENV CONFIGS=$CONFIGS"
-[ -n "${CONCURRENCY_LEVELS:-}" ] && REMOTE_ENV="$REMOTE_ENV CONCURRENCY_LEVELS=$CONCURRENCY_LEVELS"
-[ -n "${SWEEP_LENGTHS:-}" ] && REMOTE_ENV="$REMOTE_ENV SWEEP_LENGTHS=$SWEEP_LENGTHS"
-[ -n "${TOTAL_REQUESTS:-}" ] && REMOTE_ENV="$REMOTE_ENV TOTAL_REQUESTS=$TOTAL_REQUESTS"
 
 run_remote() {
     local label="$1"
@@ -288,6 +310,7 @@ run_experiment() {
         tput-outlen|exp12) run_single "Throughput vs Output Length" exp12_tput_outlen.py ;;
         tput-sat|exp13) run_single "Saturation Ceiling" exp13_tput_sat.py ;;
         overhead-load|exp14) run_single "Overhead Under Load" exp14_overhead_load.py ;;
+        per-token|exp16) run_single "Per-Token ITL Trace" exp16_per_token_trace.py ;;
         *)
             echo "Unknown experiment: $1"
             return 1
@@ -366,7 +389,8 @@ case "$COMMAND" in
     latency|exp1|decompose|exp1b|throughput|exp2|isolation|exp3|\
     seqlen|exp5|saturation|exp6|mixed|exp7|\
     prefix-cache|exp8|kv-eviction|exp10|\
-    tput-seqlen|exp11|tput-outlen|exp12|tput-sat|exp13|overhead-load|exp14)
+    tput-seqlen|exp11|tput-outlen|exp12|tput-sat|exp13|overhead-load|exp14|\
+    per-token|exp16)
         run_experiment "$COMMAND"
         ;;
 
@@ -446,6 +470,7 @@ case "$COMMAND" in
         echo "  tput-outlen     Throughput vs output length"
         echo "  tput-sat        Saturation ceiling (high concurrency)"
         echo "  overhead-load   Overhead decomposition under load"
+        echo "  per-token       Per-token ITL trace (p99 ITL, longest pause)"
         echo "  fault           Fault tolerance (destructive)"
         echo "  model-load      Cold start time (destructive)"
         echo ""
