@@ -20,9 +20,9 @@ Three direct-to-pod phases plus an optional EPP-routed comparison:
 
   Phase 1 — Cache Hit/Miss Baseline
     For each run, execute four conditions in random order:
-      (a) Cold: first time this prefix on this pod
+      (a) Cold: first time this prefix on any pod (new prompt every run)
       (b) Warm: same prefix, same pod (should hit prefix cache)
-      (c) Control: DIFFERENT prefix, same pod, same length (should be cold)
+      (c) Control: DIFFERENT new prefix, same pod, same length (should be cold)
       (d) Cross-pod: same prefix, different pod (should be cold)
     A valid prefix cache produces: TTFT(warm) < TTFT(cold) ≈ TTFT(control).
     If TTFT(control) < TTFT(cold), the proxy is broken (GPU warmth, not cache).
@@ -163,28 +163,26 @@ def main():
         conn0.warmup(warmup_prompt, MAX_TOKENS)
 
         for ptokens in CACHE_LENGTHS:
-            prompt = build_prompt(ptokens)
-            # Negative control: prefix differs from first token to prevent
-            # partial cache hits. build_prompt() repeats BASE_SENTENCE, so we
-            # prepend unique text to guarantee a different token sequence.
-            control_prompt = f"Control measurement for length {ptokens}: " + build_prompt(ptokens)
             config = f"len-{ptokens}"
             progress(f"  prefix_len={ptokens}: ", end="")
 
             for run in range(1, RUNS + 1):
-                # Step 1: ALWAYS prime the cache first (cold then warm depend on this)
-                # The cold measurement uses a DIFFERENT prompt for this run to
-                # flush any prior cache entry for `prompt` on this pod.
-                flush_prompt = f"Flush run {run} len {ptokens}: " + build_prompt(ptokens)
-                conn0.send(flush_prompt, MAX_TOKENS)
+                # Fresh test and control prompts every run (and, through
+                # PROMPT_NONCE, every invocation). A prompt reused across runs
+                # is already cached, so its "cold" and "control" measurements
+                # are hits; one flush request cannot evict it from a KV cache
+                # holding 10^5 tokens.
+                prompt = build_prompt(ptokens, cache_bust=("exp8", "test", ptokens, run))
+                control_prompt = build_prompt(ptokens,
+                                              cache_bust=("exp8", "control", ptokens, run))
 
-                # Step 2: Send the test prompt cold (first time this run)
+                # Send the test prompt cold (first time on any pod)
                 r_cold = conn0.send_streaming(prompt, MAX_TOKENS)
                 record(CachePhase.HIT_MISS, config, run, pod0_name, ptokens, 0,
                        CacheState.COLD, r_cold, trial_order=1)
                 dot()
 
-                # Step 3: Now the cache should contain `prompt`. Send the
+                # Now the cache should contain `prompt`. Send the
                 # remaining conditions in RANDOM order to prevent order effects.
                 conditions = []
                 conditions.append((CacheState.WARM_SAME_POD, conn0, prompt, pod0_name))
@@ -220,7 +218,7 @@ def main():
 
         for conv in range(1, CONV_RUNS + 1):
             progress(f"  conversation {conv}/{CONV_RUNS}: ", end="")
-            conversation = build_prompt(base_tokens)
+            conversation = build_prompt(base_tokens, cache_bust=("exp8", "conv", conv))
 
             for turn in range(1, turns + 1):
                 r = conn0.send_streaming(conversation, MAX_TOKENS)
@@ -229,7 +227,7 @@ def main():
                        f"turn_{turn}", r)
                 dot()
                 # Extend conversation for next turn (~50 tokens)
-                conversation += " " + build_prompt(50)
+                conversation += " " + build_prompt(50, cache_bust=("exp8", "conv", conv, turn))
 
             progress(" done")
 
@@ -238,10 +236,9 @@ def main():
         # ── Phase 3: Cache Decay Quick Check ──────────────────────────────
 
         progress(f"--- Phase 3: Cache Decay Quick Check (wait={CACHE_DECAY_S}s) ---")
-        decay_prompt = build_prompt(500)
-
         for run in range(1, 4):
             progress(f"  decay run {run}/3: ", end="")
+            decay_prompt = build_prompt(500, cache_bust=("exp8", "decay", run))
 
             # Prime the cache with streaming request (measures true TTFT)
             r = conn0.send_streaming(decay_prompt, MAX_TOKENS)
@@ -272,7 +269,7 @@ def main():
             progress("--- Phase 4: Prefix Cache Through EPP ---")
             progress("  Backend pod is intentionally not pinned; EPP selects each request.")
             for run in range(1, RUNS + 1):
-                prompt = f"EPP cache probe {run}: " + build_prompt(500)
+                prompt = build_prompt(500, cache_bust=("exp8", "epp", run))
                 r_first = conn_epp.send_streaming(prompt, MAX_TOKENS)
                 record(CachePhase.EPP_ROUTING, "epp-gateway", run, "epp-gateway",
                        500, 0, CacheState.EPP_FIRST, r_first)
