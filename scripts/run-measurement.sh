@@ -17,7 +17,12 @@ python3 "$root/toolkit/$command.py" validate "$config"
 
 pod="${TEST_CLIENT:-test-client}"
 run_id="$command-$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
-remote="/scripts/measurements/$run_id"
+remote_root="${MEASUREMENT_REMOTE_ROOT:-/tmp/llm-d-diagnostics}"
+if [[ "$remote_root" != /* ]]; then
+    echo "MEASUREMENT_REMOTE_ROOT must be an absolute pod path" >&2
+    exit 2
+fi
+remote="$remote_root/$run_id"
 destination="${DATA_DIR:?DATA_DIR is required}/$run_id"
 mkdir -p "$(dirname "$destination")"
 mkdir "$destination"
