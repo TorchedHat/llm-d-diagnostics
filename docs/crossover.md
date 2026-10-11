@@ -5,6 +5,8 @@ divided by the deployment's total GPU count. It generalizes the dense/MoE
 poster experiment to explicit endpoints and equal GPU allocations, using
 Python's standard library.
 
+The protocol comes from [poster issue #1](https://github.com/stmcgovern/PTC26-llm-d-diagnostics-poster/issues/1).
+
 ## Configure
 
 Copy [the example](../examples/crossover.json). Declare every model instance,
@@ -39,7 +41,9 @@ python3 toolkit/crossover.py run my-crossover.json --output data/crossover-run
 ./toolkit/run.sh clusters/my-cluster crossover my-crossover.json
 ```
 
-For sequential deployments under quota, keep the complete arm declaration:
+For sequential deployments under quota, keep the complete arm declaration
+and set one shared `nonce` in the JSON before running either arm. An omitted
+nonce is generated independently for each invocation and will not pair:
 
 ```bash
 ./toolkit/run.sh clusters/my-cluster crossover my-crossover.json --arms mono
@@ -75,6 +79,7 @@ Existing result directories are never overwritten.
   small observed gain is a sampled result, not an established threshold.
 
 Analysis checks manifests, recomputes SLO counts and GPU-normalized goodput,
+checks saved token-ID prompts and source-counter accounting,
 rejects duplicate/incompatible cells, and writes `cells.json`,
 `comparisons.json` and `comparisons.csv`. All sampled comparisons and later
 reversals are preserved. Unmatched cells do not imply a crossover.
@@ -83,3 +88,12 @@ Original poster data can be read explicitly with `analyze --legacy-poster`.
 Old completion markers/counts are checked; this does not retrospectively
 certify the new runner or create original-data manifests. Keep these inputs
 identified as legacy.
+
+## Verification
+
+This port was checked with real HTTP/SSE synthetic endpoints locally and in
+an OpenShift CPU client pod, including artifact retrieval and failed-run
+retention. Reanalysis checked 84 retained GPU cells and 56 comparisons from
+the poster campaign. The existing regression suite passed all 474 tests;
+lint, type checks, and shell syntax checks passed. These checks did not
+constitute a fresh GPU campaign with the new runner.
