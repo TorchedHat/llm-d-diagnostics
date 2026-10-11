@@ -6,6 +6,10 @@ Point it at a cluster, run experiments, get reproducible data.
 
 Python 3.8+, zero external dependencies (stdlib only).
 
+The explicit-config [crossover experiment](../docs/crossover.md) requires
+Python 3.10+ and compares SLO goodput at equal GPU counts. Use
+`run.sh <cluster-dir> crossover <config.json>` or its standalone runner.
+
 ## Architecture
 
 Three layers, two execution domains:

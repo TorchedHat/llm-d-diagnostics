@@ -60,6 +60,7 @@ Gateway, and metrics requirements.
 | `overhead-load` | Routing overhead under concurrency, including EPP when configured |
 | `model-load` | Cold start time (kills pods) |
 | `kv-eviction` | KV cache persistence under delay and pressure |
+| `crossover` | Equal-GPU monolithic/P/D SLO goodput across prompt lengths and concurrency; [guide](docs/crossover.md) |
 
 Run `characterize` for all non-destructive experiments. Run `fault-test`
 for destructive experiments (kills pods -- confirms before running).
