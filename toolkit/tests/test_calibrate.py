@@ -11,6 +11,7 @@ from exp18_calibrate import (
     overlap_theta,
     parse_kv_capacity,
     steady_decode_gaps,
+    theta_uncertainty,
 )
 
 
@@ -79,6 +80,14 @@ class TestSteadyDecodeGaps(unittest.TestCase):
 
 
 class TestOverlapTheta(unittest.TestCase):
+
+    def test_uncertainty_grows_with_chunk_length(self):
+        # H100, Qwen3-32B-FP8: an 8k-token prompt computes in ~614 ms against a
+        # 14.6 ms decode step; a 15% fit error moves theta by ~6.3. 500 tokens
+        # (~33 ms) move it by ~0.34.
+        self.assertAlmostEqual(theta_uncertainty(0.614, 0.0146), 6.31, places=2)
+        self.assertAlmostEqual(theta_uncertainty(0.033, 0.0146), 0.339, places=3)
+        self.assertAlmostEqual(theta_uncertainty(0.1, 0.01, rel_err=0.1), 1.0)
 
     def test_bounds(self):
         # Decode adds fully to the chunk: mixed = chunk + decode.

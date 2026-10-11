@@ -2582,7 +2582,13 @@ def analyze_exp18(data_dir):
     print(f"  KV cache: {kv} tokens" if kv is not None else "  KV cache: not measured")
     theta = cal.get("overlap_theta")
     if theta is not None:
-        print(f"  Overlap:  theta {theta:.2f} (0 = decode adds to the chunk, 1 = decode is free)")
+        sigma = cal.get("overlap_theta_uncertainty")
+        print(f"  Overlap:  theta {theta:.2f}"
+              + (f" +/- {sigma:.2f}" if sigma is not None else "")
+              + " (0 = decode adds to the chunk, 1 = decode is free)")
+        runs = cal.get("overlap_runs") or []
+        if len(runs) > 1:
+            print(f"            runs {min(runs):.2f} to {max(runs):.2f} ({len(runs)} injections)")
         if cal.get("overlap_mixed_step_s") is not None:
             budget = cal.get("chunk_budget_tokens")
             print(f"  Stall:    longest decode gap during a {cal.get('overlap_prompt_tokens')}-token "

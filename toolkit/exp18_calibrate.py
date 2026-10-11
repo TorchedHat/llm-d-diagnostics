@@ -23,7 +23,11 @@ whether disaggregation can pay off for a workload:
      theta = 0: decode work adds fully to the chunk; theta = 1: decode is
      free inside the chunk. Values far outside [0, 1] mean the server did
      not stall decode for the chunk (the simulator does not) or the prompt
-     spanned several chunks. The mixed step itself is the stall a prompt
+     spanned several chunks. theta subtracts two times about the size of
+     the chunk and divides by one decode step, so it is determined only for
+     a chunk a few steps long: a 15% error in the prefill fit moves it
+     by 0.15 x chunk / step (reported as its uncertainty). The mixed step
+     itself is the stall a prompt
      causes in every request decoding beside it, and is reported too; it
      depends on the server's chunk budget, so set CHUNK_BUDGET to record it.
 
@@ -54,7 +58,8 @@ Env vars:
     DECODE_OUTPUT_TOKENS   Output length for step 2 (default: 128)
     DECODE_RUNS            Repeats per batch size (default: 3)
     OVERLAP_DECODERS       Decoding requests in step 4 (default: 8)
-    OVERLAP_PROMPT_TOKENS  Injected prompt length; keep it within one chunk (default: 2048)
+    OVERLAP_PROMPT_TOKENS  Injected prompt length; keep it within one chunk and a few
+                           decode steps long, or theta is poorly determined (default: 512)
     OVERLAP_OUTPUT_TOKENS  Decoders' output length in step 4 (default: 256)
     OVERLAP_RUNS           Repeats of step 4 (default: 3)
     CHUNK_BUDGET           The server's --max-num-batched-tokens, recorded (default: unset)
@@ -110,7 +115,7 @@ DECODE_PROMPT_TOKENS = _ints("DECODE_PROMPT_TOKENS", "512,2048")
 DECODE_OUTPUT_TOKENS = int(env("DECODE_OUTPUT_TOKENS", "128"))
 DECODE_RUNS = int(env("DECODE_RUNS", "3"))
 OVERLAP_DECODERS = int(env("OVERLAP_DECODERS", "8"))
-OVERLAP_PROMPT_TOKENS = int(env("OVERLAP_PROMPT_TOKENS", "2048"))
+OVERLAP_PROMPT_TOKENS = int(env("OVERLAP_PROMPT_TOKENS", "512"))
 OVERLAP_OUTPUT_TOKENS = int(env("OVERLAP_OUTPUT_TOKENS", "256"))
 OVERLAP_RUNS = int(env("OVERLAP_RUNS", "3"))
 CHUNK_BUDGET = env("CHUNK_BUDGET", "").strip()
@@ -193,6 +198,24 @@ def steady_decode_gaps(streams):
             if prev >= start and cur <= end:
                 gaps.extend([(cur - prev) / n] * n)
     return gaps
+
+
+# Relative error of the prefill fit's compute time for one prompt. The fit
+# comes from unloaded TTFTs, which include more than the chunk's compute
+# (scheduling, the first decode step). On H100s with Qwen3-32B-FP8 two
+# calibrations of the same model disagreed by 15% at 500 tokens.
+PREFILL_FIT_REL_ERR = 0.15
+
+
+def theta_uncertainty(chunk_s, decode_s, rel_err=PREFILL_FIT_REL_ERR):
+    """How far an error of rel_err in the chunk's compute time moves theta.
+
+    theta = 1 - (mixed - chunk) / decode subtracts two times about the size
+    of the chunk and divides by one decode step, so its error is
+    rel_err * chunk / decode: about 6 for an 8k-token chunk against a 15 ms
+    step, about 0.3 for 512 tokens.
+    """
+    return rel_err * chunk_s / decode_s
 
 
 def overlap_theta(mixed_s, chunk_s, decode_s):
@@ -465,6 +488,12 @@ def phase_overlap(writer, warnings, prefill, decode):
     if not thetas:
         return None
     theta = statistics.median(thetas)
+    sigma = theta_uncertainty(statistics.median(chunk_runs), statistics.median(decode_steps))
+    if sigma > 0.5:  # theta lies in [0, 1]: +/- 0.5 cannot tell 0 from 1
+        warnings.append(f"overlap: theta is poorly determined (+/- {sigma:.1f}): the injected "
+                        f"prompt's compute ({statistics.median(chunk_runs) * 1000:.0f} ms) is many "
+                        "decode steps long, and theta divides their small difference by one "
+                        "step. Use OVERLAP_PROMPT_TOKENS of about 512; the stall is still valid")
     if not -0.5 <= theta <= 1.5:
         warnings.append(f"overlap: theta={theta:.2f} is far outside [0, 1]: the server did not "
                         "stall decode for the chunk, or the prompt spanned several chunks")
@@ -472,7 +501,7 @@ def phase_overlap(writer, warnings, prefill, decode):
     progress(f"  theta={theta:.2f} (runs: {', '.join(f'{t:.2f}' for t in thetas)})")
     progress(f"  stall: decoders' longest gap during a {statistics.median(served_runs):.0f}-token prompt "
              f"{mixed * 1000:.1f} ms (decode step {statistics.median(decode_steps) * 1000:.1f} ms)")
-    return {"overlap_theta": theta, "overlap_runs": thetas,
+    return {"overlap_theta": theta, "overlap_theta_uncertainty": sigma, "overlap_runs": thetas,
             "overlap_chunk_compute_s": statistics.median(chunk_runs),
             "overlap_prompt_tokens": statistics.median(served_runs),
             "overlap_mixed_step_s": mixed,

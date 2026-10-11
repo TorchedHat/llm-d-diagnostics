@@ -86,7 +86,7 @@ to a specific cluster.
 | `DECODE_PROMPT_TOKENS` / `DECODE_OUTPUT_TOKENS` | `512,2048` / `128` | exp18 | Prompt lengths (two or more separate per-request overhead from KV reads) and output length for the decode step fit |
 | `DECODE_RUNS` | `3` | exp18 | Repeats per batch size |
 | `OVERLAP_DECODERS` | `8` | exp18 | Decoding requests during the overlap measurement |
-| `OVERLAP_PROMPT_TOKENS` | `2048` | exp18 | Injected prompt; keep it within one prefill chunk |
+| `OVERLAP_PROMPT_TOKENS` | `512` | exp18 | Injected prompt; keep it within one prefill chunk and a few decode steps long, or theta is poorly determined (its uncertainty is reported) |
 | `OVERLAP_OUTPUT_TOKENS` / `OVERLAP_RUNS` | `256` / `3` | exp18 | Decoders' output length; repeats |
 | `CHUNK_BUDGET` | (unset) | exp18 | The server's `--max-num-batched-tokens`, recorded and checked against the injected prompt |
 | `KV_BYTES_PER_TOKEN` | (unset) | exp18 | Recorded into `calibration.json` |
