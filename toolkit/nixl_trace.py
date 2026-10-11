@@ -13,9 +13,9 @@ import urllib.parse
 
 ROOT = pathlib.Path(os.environ.get("NIXL_TRACE_DIR", "/nixl-trace"))
 CLOCK_DOMAIN = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-STARTED = {}
-FILES = {}
-LAYOUTS = set()
+STARTED: dict[int, int] = {}
+FILES: dict[tuple[int, int], int] = {}
+LAYOUTS: set[tuple[int, int]] = set()
 PATCHES = {
     "base_worker.py": (
         "348be8df3f089e774ecbc7289c40662b5b6930c8a39399a2c81d238e34acab30",
