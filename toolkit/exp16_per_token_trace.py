@@ -162,6 +162,7 @@ def main():
                     "config": config_name,
                     "load_mode": LOAD_MODE,
                     "prompt_tokens_target": PROMPT_TOKENS,
+                    "prompt_tokens_actual": r.prompt_tokens,
                     "max_tokens": MAX_TOKENS,
                     "concurrency": concurrency,
                     "run": seq,

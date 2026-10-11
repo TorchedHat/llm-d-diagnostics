@@ -2475,6 +2475,13 @@ def analyze_exp16(data_dir):
         print(f"  Data quality: {len(failed)} failed requests, {n_requests} complete")
     else:
         print(f"  Data quality: {n_requests} complete requests, 0 failed")
+    served = sorted({(r["run"], r["config"], r["concurrency"]): safe_int(r.get("prompt_tokens_actual"))
+                     for r in ok}.values())
+    served = [n for n in served if n]
+    if served:
+        target = safe_int(ok[0]["prompt_tokens_target"])
+        print(f"  Prompt tokens (server count): median {served[len(served) // 2]} "
+              f"(target {target}, range {served[0]}-{served[-1]})")
     if short:
         print(f"  WARNING: {short}/{n_requests} requests stopped before max_tokens "
               f"(run with IGNORE_EOS=1 to control output length)")

@@ -396,6 +396,7 @@ class Exp16Row(TypedDict):
     config: str
     load_mode: str
     prompt_tokens_target: str
+    prompt_tokens_actual: str  # server-reported (usage); the target can be far off
     max_tokens: str
     concurrency: str
     run: str

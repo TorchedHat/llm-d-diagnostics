@@ -224,6 +224,15 @@ class TestExp16Analysis(unittest.TestCase):
                 })
         return rows
 
+    def test_reports_server_prompt_count_against_target(self):
+        rows = self._rows("BASELINE", [[300.0] + [12.0] * 9 for _ in range(3)])
+        for row in rows:
+            row["prompt_tokens_actual"] = 1330 + row["run"]   # target 1000: Qwen counts ~1.33x
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write(os.path.join(tmpdir, "exp16-results.csv"), Exp16Row, rows)
+            out = _run(analyze_exp16, tmpdir)
+        self.assertIn("Prompt tokens (server count): median 1332 (target 1000, range 1331-1333)", out)
+
     def test_multi_token_chunks_are_reported_not_counted_short(self):
         rows = self._rows("BASELINE", [[300.0] + [12.0] * 9 for _ in range(3)])
         for row in rows:

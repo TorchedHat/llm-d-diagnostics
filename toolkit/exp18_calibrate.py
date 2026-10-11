@@ -288,9 +288,8 @@ def phase_decode(writer, warnings):
     progress("--- Step 2: decode step time vs batch size and context ---")
     points = []  # (batch, mean context tokens, step seconds)
     for prompt_tokens in DECODE_PROMPT_TOKENS:
-        ctx = prompt_tokens + DECODE_OUTPUT_TOKENS / 2
         for batch in DECODE_BATCHES:
-            steps = []
+            steps, run_contexts = [], []
             for run in range(1, DECODE_RUNS + 1):
                 threads, out = _start_streams(batch, prompt_tokens, DECODE_OUTPUT_TOKENS,
                                               ("decode", prompt_tokens, batch, run))
@@ -309,17 +308,29 @@ def phase_decode(writer, warnings):
                     continue
                 step = statistics.median(gaps)
                 steps.append(step)
+                # Context from the server's prompt count: the prompt builder's
+                # target can be a third off, depending on the tokenizer.
+                served = statistics.median(r.prompt_tokens for _, r in out)
+                if not served:
+                    served = prompt_tokens
+                    warnings.append(f"decode: B={batch} prompt={prompt_tokens} run {run}: no "
+                                    "server prompt count; context taken from the target")
+                ctx = served + DECODE_OUTPUT_TOKENS / 2
+                run_contexts.append(ctx)
                 _row(writer, "decode", "step", f"B={batch};ctx={ctx:.0f}", run, step, "s",
-                     detail=f"gaps={len(gaps)}")
+                     r=out[0][1], detail=f"gaps={len(gaps)}")
                 dot()
             if steps:
-                points.append((batch, ctx, statistics.median(steps)))
+                points.append((batch, statistics.median(run_contexts), statistics.median(steps)))
     progress("")
+    # Server counts differ by a few tokens between prompts, so the number of
+    # contexts is the number of configured prompt lengths.
     contexts = sorted({c for _, c, _ in points})
+    n_contexts = len(set(DECODE_PROMPT_TOKENS))
     if len({b for b, _, _ in points}) < 2:
         warnings.append("decode: fewer than 2 batch sizes succeeded; no fit")
         return None
-    if len(contexts) >= 2:
+    if n_contexts >= 2:
         # step = w + B * (c0 + k * ctx): per-step weights, per-request overhead, KV reads.
         (w, c0, k), r2 = fit_linear([[1.0, b, b * c] for b, c, _ in points],
                                     [s for _, _, s in points])
@@ -340,7 +351,7 @@ def phase_decode(writer, warnings):
         warnings.append("decode: one context only; the per-request slope is attributed to KV "
                         "reads (set two DECODE_PROMPT_TOKENS values to separate them)")
         (w, slope), r2 = fit_poly([b for b, _, _ in points], [s for _, _, s in points], 1)
-        c0, k = 0.0, slope / contexts[0]
+        c0, k = 0.0, slope / statistics.median(contexts)
     progress(f"  step(B, ctx) = {w * 1000:.2f} ms + B x ({c0 * 1000:.3f} ms + "
              f"{k * 1e9:.2f} ns x ctx)   R^2={r2:.4f}")
     return {"decode_weight_s": w, "decode_per_request_s": c0, "decode_kv_s_per_token": k,
@@ -392,7 +403,7 @@ def phase_overlap(writer, warnings, prefill, decode):
     if delay + chunk + 20 * step > OVERLAP_OUTPUT_TOKENS * step:
         warnings.append("overlap: decoders may finish before the injection; "
                         "raise OVERLAP_OUTPUT_TOKENS")
-    thetas, mixed_steps, decode_steps = [], [], []
+    thetas, mixed_steps, decode_steps, chunk_runs, served_runs = [], [], [], [], []
     for run in range(1, OVERLAP_RUNS + 1):
         threads, out = _start_streams(b, dec_prompt, OVERLAP_OUTPUT_TOKENS,
                                       ("overlap", run))
@@ -405,6 +416,11 @@ def phase_overlap(writer, warnings, prefill, decode):
         if injected.status != 200 or any(r.status != 200 for _, r in out):
             warnings.append(f"overlap: run {run} had failed requests")
             continue
+        if CHUNK_BUDGET and injected.prompt_tokens > int(CHUNK_BUDGET):
+            warnings.append(f"overlap: run {run}: the injected prompt was "
+                            f"{injected.prompt_tokens} tokens (server count), more than "
+                            f"CHUNK_BUDGET {CHUNK_BUDGET}: it spanned several chunks, so theta "
+                            "is not meaningful (the stall still is)")
         before, longest, merged = [], [], 0
         for t0, r in out:
             absolute = [t0 + t for t in r.token_times]
@@ -430,14 +446,20 @@ def phase_overlap(writer, warnings, prefill, decode):
         mixed = statistics.median(longest)
         # Step time just before the injection: the last few steps of every decoder.
         decode_step = statistics.median(g for _, g in sorted(before)[-5 * b:])
-        theta = overlap_theta(mixed, chunk, decode_step)
+        # Prefill compute of the prompt as the server counted it, not the target.
+        served = injected.prompt_tokens or OVERLAP_PROMPT_TOKENS
+        chunk_run = (prefill["prefill_a_s_per_token"] * served
+                     + prefill["prefill_b_s_per_token2"] * served ** 2)
+        theta = overlap_theta(mixed, chunk_run, decode_step)
         thetas.append(theta)
         mixed_steps.append(mixed)
         decode_steps.append(decode_step)
+        chunk_runs.append(chunk_run)
+        served_runs.append(served)
         _row(writer, "overlap", "mixed_step", OVERLAP_PROMPT_TOKENS, run, mixed, "s", injected)
         _row(writer, "overlap", "decode_step", b, run, decode_step, "s")
         _row(writer, "overlap", "theta", OVERLAP_PROMPT_TOKENS, run, theta, "ratio",
-             detail=f"chunk_compute_s={chunk:.6f}")
+             r=injected, detail=f"chunk_compute_s={chunk_run:.6f}")
         dot()
     progress("")
     if not thetas:
@@ -448,10 +470,11 @@ def phase_overlap(writer, warnings, prefill, decode):
                         "stall decode for the chunk, or the prompt spanned several chunks")
     mixed = statistics.median(mixed_steps)
     progress(f"  theta={theta:.2f} (runs: {', '.join(f'{t:.2f}' for t in thetas)})")
-    progress(f"  stall: decoders' longest gap during a {OVERLAP_PROMPT_TOKENS}-token prompt "
+    progress(f"  stall: decoders' longest gap during a {statistics.median(served_runs):.0f}-token prompt "
              f"{mixed * 1000:.1f} ms (decode step {statistics.median(decode_steps) * 1000:.1f} ms)")
     return {"overlap_theta": theta, "overlap_runs": thetas,
-            "overlap_chunk_compute_s": chunk, "overlap_prompt_tokens": OVERLAP_PROMPT_TOKENS,
+            "overlap_chunk_compute_s": statistics.median(chunk_runs),
+            "overlap_prompt_tokens": statistics.median(served_runs),
             "overlap_mixed_step_s": mixed,
             "overlap_decode_step_s": statistics.median(decode_steps)}
 

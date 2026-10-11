@@ -79,7 +79,7 @@ class TestFieldsFor(unittest.TestCase):
         self.assertEqual(len(fields_for(Exp11Row)), 13)
         self.assertEqual(len(fields_for(Exp14Row)), 12)
         self.assertEqual(len(fields_for(Exp12Row)), 18)
-        self.assertEqual(len(fields_for(Exp16Row)), 16)
+        self.assertEqual(len(fields_for(Exp16Row)), 17)
         self.assertEqual(len(fields_for(Exp18Row)), 11)
 
 
