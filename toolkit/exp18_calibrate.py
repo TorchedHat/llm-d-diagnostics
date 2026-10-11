@@ -23,7 +23,14 @@ whether disaggregation can pay off for a workload:
      theta = 0: decode work adds fully to the chunk; theta = 1: decode is
      free inside the chunk. Values far outside [0, 1] mean the server did
      not stall decode for the chunk (the simulator does not) or the prompt
-     spanned several chunks.
+     spanned several chunks. The mixed step itself is the stall a prompt
+     causes in every request decoding beside it, and is reported too; it
+     depends on the server's chunk budget, so set CHUNK_BUDGET to record it.
+
+Requests ask for token IDs (return_token_ids), so a chunk that carries
+several tokens is counted as several: its gap is shared between them in
+step 2, and an overlap run with such a chunk across the injection is
+skipped (its longest gap may span more than one step).
 
 The KV transfer cost comes from exp5b; pass it as TRANSFER_ALPHA_S and
 TRANSFER_BW_BYTES_PER_S to include it in calibration.json.
@@ -164,23 +171,27 @@ def fit_poly(xs, ys, degree):
 
 
 def steady_decode_gaps(streams):
-    """Gaps (s) between tokens while every request decodes and none has finished.
+    """Per-token gaps (s) while every request decodes and none has finished.
 
-    streams: list of (send_time, token_times) with token_times relative to
-    send_time. The window starts when the last request's first token arrives
-    and ends when the first request's last token arrives.
+    streams: list of (send_time, token_times[, token_counts]) with
+    token_times relative to send_time. The window starts when the last
+    request's first token arrives and ends when the first request's last
+    token arrives. A chunk that carried n tokens contributes its gap / n,
+    n times, so a server that batches tokens into chunks does not read as
+    a slower decode step.
     """
-    live = [(t0, tt) for t0, tt in streams if len(tt) >= 2]
+    live = [(t0, tt, (rest[0] if rest else ()) or (1,) * len(tt))
+            for t0, tt, *rest in streams if len(tt) >= 2]
     if len(live) != len(streams) or not live:
         return []
-    start = max(t0 + tt[0] for t0, tt in live)
-    end = min(t0 + tt[-1] for t0, tt in live)
+    start = max(t0 + tt[0] for t0, tt, _ in live)
+    end = min(t0 + tt[-1] for t0, tt, _ in live)
     gaps = []
-    for t0, tt in live:
+    for t0, tt, counts in live:
         absolute = [t0 + t for t in tt]
-        for prev, cur in pairwise(absolute):
+        for (prev, cur), n in zip(pairwise(absolute), counts[1:], strict=True):
             if prev >= start and cur <= end:
-                gaps.append(cur - prev)
+                gaps.extend([(cur - prev) / n] * n)
     return gaps
 
 
@@ -212,7 +223,7 @@ def parse_kv_capacity(metrics_text):
 
 def _stream(prompt, max_tokens):
     return send_streaming(CALIBRATE_URL, prompt, max_tokens, timeout=STREAM_TIMEOUT,
-                          ignore_eos=True, include_usage=True)
+                          ignore_eos=True, include_usage=True, token_ids=True)
 
 
 def _prompt(tokens, *key):
@@ -290,7 +301,7 @@ def phase_decode(writer, warnings):
                     warnings.append(f"decode: B={batch} prompt={prompt_tokens} run {run}: "
                                     f"{len(failed)} failed requests")
                     continue
-                gaps = steady_decode_gaps([(t0, r.token_times) for t0, r in out])
+                gaps = steady_decode_gaps([(t0, r.token_times, r.token_counts) for t0, r in out])
                 if len(gaps) < batch:
                     warnings.append(f"decode: B={batch} prompt={prompt_tokens} run {run}: no "
                                     f"steady window (raise DECODE_OUTPUT_TOKENS, or B exceeds "
@@ -360,7 +371,11 @@ def phase_overlap(writer, warnings, prefill, decode):
     if not prefill or not decode:
         warnings.append("overlap: needs steps 1 and 2")
         return None
-    if CHUNK_BUDGET and OVERLAP_PROMPT_TOKENS > int(CHUNK_BUDGET):
+    if not CHUNK_BUDGET:
+        warnings.append("overlap: CHUNK_BUDGET not set; the stall a prompt causes depends on "
+                        "the server's --max-num-batched-tokens (with vLLM's default of 8192, "
+                        "an 8k prompt prefills in one step), so record it")
+    elif OVERLAP_PROMPT_TOKENS > int(CHUNK_BUDGET):
         warnings.append("overlap: OVERLAP_PROMPT_TOKENS exceeds CHUNK_BUDGET; the prompt "
                         "spans several chunks and theta is not meaningful")
     b = OVERLAP_DECODERS
@@ -377,7 +392,7 @@ def phase_overlap(writer, warnings, prefill, decode):
     if delay + chunk + 20 * step > OVERLAP_OUTPUT_TOKENS * step:
         warnings.append("overlap: decoders may finish before the injection; "
                         "raise OVERLAP_OUTPUT_TOKENS")
-    thetas = []
+    thetas, mixed_steps, decode_steps = [], [], []
     for run in range(1, OVERLAP_RUNS + 1):
         threads, out = _start_streams(b, dec_prompt, OVERLAP_OUTPUT_TOKENS,
                                       ("overlap", run))
@@ -390,17 +405,25 @@ def phase_overlap(writer, warnings, prefill, decode):
         if injected.status != 200 or any(r.status != 200 for _, r in out):
             warnings.append(f"overlap: run {run} had failed requests")
             continue
-        before, longest = [], []
+        before, longest, merged = [], [], 0
         for t0, r in out:
             absolute = [t0 + t for t in r.token_times]
+            counts = r.token_counts or (1,) * len(absolute)
             during = []
-            for prev, cur in pairwise(absolute):
+            for (prev, cur), n in zip(pairwise(absolute), counts[1:], strict=True):
                 if cur <= inject_start:
-                    before.append((cur, cur - prev))
+                    before.append((cur, (cur - prev) / n))
                 elif prev < inject_end and cur > inject_start:
                     during.append(cur - prev)
+                    merged += n > 1
             if during:
                 longest.append(max(during))
+        if merged:
+            # Several tokens in one chunk: the longest gap may span more than
+            # the mixed step, so this run cannot measure it.
+            warnings.append(f"overlap: run {run}: {merged} chunks across the injection carried "
+                            "several tokens; run skipped")
+            continue
         if not before or len(longest) < b:
             warnings.append(f"overlap: run {run}: decoders not running across the injection")
             continue
@@ -409,6 +432,8 @@ def phase_overlap(writer, warnings, prefill, decode):
         decode_step = statistics.median(g for _, g in sorted(before)[-5 * b:])
         theta = overlap_theta(mixed, chunk, decode_step)
         thetas.append(theta)
+        mixed_steps.append(mixed)
+        decode_steps.append(decode_step)
         _row(writer, "overlap", "mixed_step", OVERLAP_PROMPT_TOKENS, run, mixed, "s", injected)
         _row(writer, "overlap", "decode_step", b, run, decode_step, "s")
         _row(writer, "overlap", "theta", OVERLAP_PROMPT_TOKENS, run, theta, "ratio",
@@ -421,9 +446,14 @@ def phase_overlap(writer, warnings, prefill, decode):
     if not -0.5 <= theta <= 1.5:
         warnings.append(f"overlap: theta={theta:.2f} is far outside [0, 1]: the server did not "
                         "stall decode for the chunk, or the prompt spanned several chunks")
+    mixed = statistics.median(mixed_steps)
     progress(f"  theta={theta:.2f} (runs: {', '.join(f'{t:.2f}' for t in thetas)})")
+    progress(f"  stall: decoders' longest gap during a {OVERLAP_PROMPT_TOKENS}-token prompt "
+             f"{mixed * 1000:.1f} ms (decode step {statistics.median(decode_steps) * 1000:.1f} ms)")
     return {"overlap_theta": theta, "overlap_runs": thetas,
-            "overlap_chunk_compute_s": chunk, "overlap_prompt_tokens": OVERLAP_PROMPT_TOKENS}
+            "overlap_chunk_compute_s": chunk, "overlap_prompt_tokens": OVERLAP_PROMPT_TOKENS,
+            "overlap_mixed_step_s": mixed,
+            "overlap_decode_step_s": statistics.median(decode_steps)}
 
 
 def main():

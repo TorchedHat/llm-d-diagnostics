@@ -68,9 +68,14 @@ class TestHelpers(unittest.TestCase):
 
     def test_token_rows_first_gap_is_ttft(self):
         rows = list(token_rows(_result(token_times=(0.2, 0.21, 0.25))))
-        self.assertEqual(rows[0], (0, 200.0, 200.0))
-        self.assertEqual(rows[1], (1, 210.0, 10.0))
-        self.assertEqual(rows[2], (2, 250.0, 40.0))
+        self.assertEqual(rows[0], (0, 200.0, 200.0, ""))
+        self.assertEqual(rows[1], (1, 210.0, 10.0, ""))
+        self.assertEqual(rows[2], (2, 250.0, 40.0, ""))
+
+    def test_token_rows_record_tokens_per_chunk(self):
+        r = _result(token_times=(0.2, 0.21, 0.25))
+        r = RequestResult(**{**r.__dict__, "token_counts": (1, 1, 3)})
+        self.assertEqual([row[3] for row in token_rows(r)], [1, 1, 3])
 
     def test_route_alternates_for_2d(self):
         tags = [route_throughput(ConfigThroughput.DISAGG_2D, s)[2] for s in (1, 2)]
@@ -219,6 +224,20 @@ class TestExp16Analysis(unittest.TestCase):
                 })
         return rows
 
+    def test_multi_token_chunks_are_reported_not_counted_short(self):
+        rows = self._rows("BASELINE", [[300.0] + [12.0] * 9 for _ in range(3)])
+        for row in rows:
+            row["tokens_in_chunk"] = 1
+        # Request 1: its last two tokens arrive in one chunk (10 tokens, 9 chunks).
+        rows = [r for r in rows if not (r["run"] == 1 and r["token_idx"] == 9)]
+        rows[8]["tokens_in_chunk"] = 2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write(os.path.join(tmpdir, "exp16-results.csv"), Exp16Row, rows)
+            out = _run(analyze_exp16, tmpdir)
+        self.assertIn("1/3 requests had chunks carrying several tokens", out)
+        self.assertNotIn("stopped before max_tokens", out)
+        self.assertNotIn("empty text", out)
+
     def test_longest_pause_and_failed_requests(self):
         # Monolithic: one 400 ms stall per request; P/D: flat 12 ms gaps.
         mono = [[300.0] + [12.0] * 20 + [400.0] + [12.0] * 20 for _ in range(5)]
@@ -235,6 +254,7 @@ class TestExp16Analysis(unittest.TestCase):
             _write(os.path.join(tmpdir, "exp16-results.csv"), Exp16Row, rows)
             out = _run(analyze_exp16, tmpdir)
         self.assertIn("1 failed requests, 10 complete", out)
+        self.assertNotIn("carrying several tokens", out)
         baseline_line = next(l for l in out.splitlines() if l.strip().startswith("BASELINE |"))
         pd_line = next(l for l in out.splitlines() if l.strip().startswith("DISAGG-2D |"))
         self.assertIn("400.0ms", baseline_line)   # longest pause per request

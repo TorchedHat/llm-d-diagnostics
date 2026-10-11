@@ -2462,10 +2462,13 @@ def analyze_exp16(data_dir):
     n_requests = len(set((r["config"], r["concurrency"], r["run"]) for r in ok))
     chunks = defaultdict(int)
     server = {}
+    multi = set()
     for r in ok:
         k = (r["config"], r["concurrency"], r["run"], safe_int(r["max_tokens"]))
-        chunks[k] += 1
+        chunks[k] += safe_int(r.get("tokens_in_chunk")) or 1
         server[k] = safe_int(r.get("server_completion_tokens"))
+        if safe_int(r.get("tokens_in_chunk")) > 1:
+            multi.add(k)
     short = sum(1 for k, n in chunks.items() if (server[k] or n) < k[3])
     merged = sum(1 for k, n in chunks.items() if server[k] > n)
     if failed:
@@ -2478,6 +2481,9 @@ def analyze_exp16(data_dir):
     if merged:
         print(f"  NOTE: {merged}/{n_requests} requests had tokens with empty text; their "
               f"time is merged into the next gap")
+    if multi:
+        print(f"  NOTE: {len(multi)}/{n_requests} requests had chunks carrying several tokens "
+              f"(tokens_in_chunk > 1); each such gap spans several decode steps")
     if dropped:
         print(f"  Steady load: dropped {dropped} ramp-up/ramp-down requests")
     slo_ms = safe_float(os.environ.get("ITL_SLO_MS", "50"), 50.0)
@@ -2570,6 +2576,12 @@ def analyze_exp18(data_dir):
     theta = cal.get("overlap_theta")
     if theta is not None:
         print(f"  Overlap:  theta {theta:.2f} (0 = decode adds to the chunk, 1 = decode is free)")
+        if cal.get("overlap_mixed_step_s") is not None:
+            budget = cal.get("chunk_budget_tokens")
+            print(f"  Stall:    longest decode gap during a {cal.get('overlap_prompt_tokens')}-token "
+                  f"prompt {cal['overlap_mixed_step_s'] * 1000:.1f} ms vs decode step "
+                  f"{cal['overlap_decode_step_s'] * 1000:.1f} ms (chunk budget "
+                  f"{budget if budget else 'not recorded'})")
     else:
         print("  Overlap:  not measured")
     transfer = cal.get("transfer")

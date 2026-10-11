@@ -338,6 +338,14 @@ class RequestResult:
     error: str = ""       # error message if request failed
     token_times: tuple[float, ...] = ()  # monotonic per-token timestamps (s from request start)
     usage_completion_tokens: int = 0  # server-reported count (streaming, include_usage); 0 if unknown
+    # Tokens carried by each timed chunk, parallel to token_times; empty when
+    # the server did not report token IDs (send_streaming token_ids=True).
+    token_counts: tuple[int, ...] = ()
+
+    @property
+    def merged_chunks(self) -> int:
+        """Timed chunks that carried more than one token (0 if unknown)."""
+        return sum(1 for n in self.token_counts if n > 1)
 
     @property
     def ok(self) -> bool:
@@ -449,7 +457,7 @@ def send_disagg(url, prompt, max_tokens=MAX_TOKENS):
 
 
 def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeout=30,
-                   ignore_eos=False, include_usage=False):
+                   ignore_eos=False, include_usage=False, token_ids=False):
     """Send a streaming completion request with true TTFT measurement.
 
     Uses SSE (server-sent events) to measure the actual time to first
@@ -465,6 +473,13 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
     include_usage asks for the server's own token count in the final chunk
     (usage_completion_tokens). completion_tokens counts streamed chunks with
     text, which can be lower when a token decodes to an empty string.
+
+    token_ids asks for each chunk's token IDs (vLLM's return_token_ids), so
+    a chunk is timed even when its text is empty, and token_counts records
+    how many tokens it carried: a server under load can send several tokens
+    in one chunk, and their gaps then arrive as one. If the server sends
+    text without IDs, token_counts stays empty and chunks are timed as
+    before (one token per chunk with text).
 
     Returns:
         RequestResult with accurate ttft_ms, per-token token_times,
@@ -488,6 +503,8 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
         body["ignore_eos"] = True
     if include_usage:
         body["stream_options"] = {"include_usage": True}
+    if token_ids:
+        body["return_token_ids"] = True
     payload = json.dumps(body)
 
     headers = request_headers(url, extra_headers)
@@ -515,6 +532,8 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
                 body=body, error=http_error(status, body),
             )
         token_times = []
+        token_counts = []
+        ids_missing = False
         prompt_tokens = 0
         usage_completion = 0
         last_chunk = {}
@@ -533,8 +552,13 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
                 try:
                     chunk = json.loads(line[6:])
                     choices = chunk.get("choices", [])
-                    if choices and choices[0].get("text", ""):
+                    ids = (choices[0].get("token_ids") or []) if choices and token_ids else []
+                    if ids:
                         token_times.append(time.monotonic() - start)
+                        token_counts.append(len(ids))
+                    elif choices and choices[0].get("text", ""):
+                        token_times.append(time.monotonic() - start)
+                        ids_missing = token_ids
                     # Capture usage from last chunk (vLLM includes it there)
                     usage = chunk.get("usage")
                     if usage:
@@ -559,6 +583,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
             body=last_chunk,
             token_times=tuple(token_times),
             usage_completion_tokens=usage_completion,
+            token_counts=() if ids_missing else tuple(token_counts),
         )
 
     except Exception as e:

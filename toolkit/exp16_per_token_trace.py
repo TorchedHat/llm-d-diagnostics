@@ -95,21 +95,24 @@ if ConfigThroughput.DISAGG_EPP in CONFIGS and not epp_enabled():
 
 
 def token_rows(r):
-    """Yield (token_idx, elapsed_ms, gap_ms) for one streamed request.
+    """Yield (token_idx, elapsed_ms, gap_ms, tokens_in_chunk) for one streamed request.
 
     token_times are monotonic timestamps relative to the request start, so
-    the first gap is the TTFT.
+    the first gap is the TTFT. Each row is one timed chunk; tokens_in_chunk
+    is how many tokens it carried ("" if the server did not report token
+    IDs). A chunk with several tokens spans several decode steps in one gap.
     """
     prev = 0.0
-    for idx, t in enumerate(r.token_times):
-        yield idx, round(t * 1000, 2), round((t - prev) * 1000, 2)
+    counts = r.token_counts or ("",) * len(r.token_times)
+    for idx, (t, n) in enumerate(zip(r.token_times, counts, strict=True)):
+        yield idx, round(t * 1000, 2), round((t - prev) * 1000, 2), n
         prev = t
 
 
 def stream(url, headers, prompt, max_tokens):
     return send_streaming(url, prompt, max_tokens, extra_headers=headers,
                           timeout=STREAM_TIMEOUT, ignore_eos=IGNORE_EOS,
-                          include_usage=True)
+                          include_usage=True, token_ids=True)
 
 
 def main():
@@ -169,10 +172,12 @@ def main():
                     "error": r.error,
                 }
                 if r.status != 200 or not r.token_times:
-                    rows = [{**base, "token_idx": -1, "elapsed_ms": r.total_ms, "gap_ms": 0}]
+                    rows = [{**base, "token_idx": -1, "elapsed_ms": r.total_ms, "gap_ms": 0,
+                             "tokens_in_chunk": ""}]
                 else:
-                    rows = [{**base, "token_idx": idx, "elapsed_ms": elapsed_ms, "gap_ms": gap_ms}
-                            for idx, elapsed_ms, gap_ms in token_rows(r)]
+                    rows = [{**base, "token_idx": idx, "elapsed_ms": elapsed_ms, "gap_ms": gap_ms,
+                             "tokens_in_chunk": n}
+                            for idx, elapsed_ms, gap_ms, n in token_rows(r)]
                 writer.write_many(rows)
                 dot()
                 return r

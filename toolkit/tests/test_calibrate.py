@@ -61,6 +61,19 @@ class TestSteadyDecodeGaps(unittest.TestCase):
         self.assertEqual(len(gaps), 38)
         self.assertTrue(all(abs(g - 0.01) < 1e-9 for g in gaps))
 
+    def test_multi_token_chunk_is_shared_between_its_tokens(self):
+        # B's tokens arrive every 10 ms, except one chunk carrying 2 tokens
+        # 20 ms after the previous one: two 10 ms steps, not one 20 ms step.
+        a = [0.10 + 0.01 * i for i in range(30)]
+        b = [0.10 + 0.01 * i for i in range(30) if i != 15]
+        counts = [1] * 29
+        counts[15] = 2
+        gaps = steady_decode_gaps([(0.0, a), (0.0, b, counts)])
+        self.assertEqual(len(gaps), 2 * 29)
+        self.assertTrue(all(abs(g - 0.01) < 1e-9 for g in gaps))
+        # Without the counts the merged chunk reads as one 20 ms step.
+        self.assertAlmostEqual(max(steady_decode_gaps([(0.0, a), (0.0, b)])), 0.02)
+
     def test_no_window_when_a_request_failed(self):
         self.assertEqual(steady_decode_gaps([(0.0, [0.1, 0.2]), (0.0, [])]), [])
 

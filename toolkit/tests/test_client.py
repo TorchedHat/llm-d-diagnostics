@@ -3,6 +3,7 @@
 Tests build_prompt, TypedCSVWriter, and write_run_info.
 """
 
+import http.server
 import json
 import os
 import runpy
@@ -261,6 +262,64 @@ class TestWriteRunInfo(unittest.TestCase):
         with patch.dict(os.environ, {"TOOLKIT_COMMIT": ""}):
             commit = client.toolkit_commit()
         self.assertRegex(commit, r"^([0-9a-f]{12}(-dirty)?|unknown)$")
+
+
+class _SSEHandler(http.server.BaseHTTPRequestHandler):
+    chunks: list = []
+    bodies: list = []
+
+    def do_POST(self):
+        self.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for chunk in self.chunks:
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *args):
+        pass
+
+
+class TestSendStreamingTokenIds(unittest.TestCase):
+    """send_streaming against a local SSE server."""
+
+    def _serve(self, chunks):
+        handler = type("H", (_SSEHandler,), {"chunks": chunks, "bodies": []})
+        server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}/v1/completions", handler
+
+    def test_counts_tokens_per_chunk(self):
+        usage = {"prompt_tokens": 5, "completion_tokens": 4}
+        url, handler = self._serve([
+            {"choices": [{"text": "a", "token_ids": [1]}]},
+            {"choices": [{"text": "bc", "token_ids": [2, 3]}]},
+            {"choices": [{"text": "", "token_ids": [4]}]},   # empty text, still a token
+            {"choices": [], "usage": usage}])
+        r = client.send_streaming(url, "hi", 4, include_usage=True, token_ids=True)
+        self.assertTrue(handler.bodies[0]["return_token_ids"])
+        self.assertEqual(r.token_counts, (1, 2, 1))
+        self.assertEqual(len(r.token_times), 3)
+        self.assertEqual(r.merged_chunks, 1)
+        self.assertEqual(r.usage_completion_tokens, 4)
+
+    def test_server_without_token_ids_falls_back(self):
+        url, handler = self._serve([{"choices": [{"text": "a"}]}, {"choices": [{"text": "b"}]}])
+        r = client.send_streaming(url, "hi", 2, token_ids=True)
+        self.assertEqual(r.token_counts, ())
+        self.assertEqual(len(r.token_times), 2)
+        r = client.send_streaming(url, "hi", 2)
+        self.assertNotIn("return_token_ids", handler.bodies[-1])
+
+    def test_ids_on_some_chunks_only_drops_the_counts(self):
+        # Counts must stay parallel to token_times or be absent.
+        url, _ = self._serve([{"choices": [{"text": "a", "token_ids": [1]}]},
+                              {"choices": [{"text": "b"}]}])
+        r = client.send_streaming(url, "hi", 2, token_ids=True)
+        self.assertEqual(len(r.token_times), 2)
+        self.assertEqual(r.token_counts, ())
 
 
 class TestRouting(unittest.TestCase):

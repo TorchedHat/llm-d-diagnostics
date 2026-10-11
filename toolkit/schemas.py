@@ -403,6 +403,7 @@ class Exp16Row(TypedDict):
     token_idx: str
     elapsed_ms: str
     gap_ms: str
+    tokens_in_chunk: str  # tokens this timed chunk carried; "" if the server did not say
     server_completion_tokens: str
     status_code: str
     target: str
