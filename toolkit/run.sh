@@ -60,6 +60,10 @@ COMMAND="${2:-characterize}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+if [[ "$COMMAND" == crossover || "$COMMAND" == bandwidth ]]; then
+    exec bash "$REPO_ROOT/scripts/run-measurement.sh" "$CLUSTER_DIR" "$COMMAND" "${@:3}"
+fi
+
 # Sweep takes a JSON config as first arg, not a cluster dir
 if [ "$COMMAND" = "sweep" ]; then
     python3 "$REPO_ROOT/toolkit/sweep.py" "$CLUSTER_DIR" "${@:3}"
