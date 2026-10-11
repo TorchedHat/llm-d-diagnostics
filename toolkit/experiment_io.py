@@ -128,6 +128,10 @@ def manifest(directory):
 def verify_manifest(directory):
     directory = pathlib.Path(directory)
     records = json.loads((directory / "manifest.json").read_text())
+    actual = {str(p.relative_to(directory)) for p in directory.rglob("*")
+              if p.is_file() and p != directory / "manifest.json"}
+    if set(records) != actual:
+        raise ValueError("manifest file list differs from the artifact directory")
     for name, expected in records.items():
         path = (directory / name).resolve()
         if not path.is_relative_to(directory.resolve()) or not path.is_file():
@@ -182,6 +186,8 @@ def send(config, target, prompt, index, salt, output_tokens, extra=None):
                     raise RuntimeError("expected one completion choice")
                 for choice in choices:
                     part = choice.get("token_ids") or []
+                    if not isinstance(part, list) or any(type(i) is not int or i < 0 for i in part):
+                        raise RuntimeError("invalid completion token IDs")
                     if choice.get("text") and not part:
                         raise RuntimeError("token IDs missing; streamed chunks cannot be counted as tokens")
                     if part:
