@@ -61,6 +61,25 @@ Gateway, and metrics requirements.
 | `model-load` | Cold start time (kills pods) |
 | `kv-eviction` | KV cache persistence under delay and pressure |
 
+### Which transport is the KV transfer using?
+
+`characterize` starts with a transport witness, and
+`./toolkit/run.sh <cluster> transport` runs it alone. For each
+prefill-to-decode pair it sends a few cache-busted requests and compares the
+NIXL payload bytes the decode pod received with the bytes on its network
+interfaces: KV that crossed the pod network appears there (ratio about 1, TCP);
+KV moved by RDMA or CUDA IPC does not (ratio about 0). It also reports what
+each pod could use (RDMA device, `UCX_TLS`, `hostNetwork`) and, when deployed
+with `TRANSPORT_LOG=1`, the transport and device UCX logged. The verdict goes
+to `transport.json`, `run-info.json` and the first line of the analysis:
+
+```
+  TRANSPORT: tcp (cross-node, witnessed by byte accounting)
+    KV bytes crossed the pod network (eth0): TCP
+```
+
+Run it before or between experiments, not during: its requests add load.
+
 Run `characterize` for all non-destructive experiments. Run `fault-test`
 for destructive experiments (kills pods -- confirms before running).
 

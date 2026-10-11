@@ -41,6 +41,7 @@
 #     analyze       Statistical analysis of collected data (local)
 #     metrics       Standalone Prometheus metrics collection
 #     preflight     Verify cluster is ready for experiments
+#     transport     Witness which transport the KV transfer uses (TCP, RDMA, CUDA IPC)
 #
 # Prerequisites:
 #   1. test-client pod is running (oc apply -f manifests/ -n <namespace>)
@@ -323,6 +324,22 @@ copy_results() {
     return 1
 }
 
+# ── Transport witness ─────────────────────────────────────────────────────
+# Measures which transport the KV transfer actually uses (transport.py) and
+# copies transport.json into the pod so run-info.json records the verdict.
+# Sends a short burst of requests: run it before experiments, never during.
+run_transport_witness() {
+    mkdir -p "$DATA_DIR"
+    local rc=0
+    NS="$NS" DATA_DIR="$DATA_DIR" POD="$POD" REMOTE_DIR="$REMOTE_DIR" \
+        SIDECAR_SCHEME="$SIDECAR_SCHEME" \
+        python3 "$SCRIPT_DIR/transport.py" || rc=$?
+    if [ -f "$DATA_DIR/transport.json" ]; then
+        oc cp "$DATA_DIR/transport.json" "$NS/$POD:$REMOTE_DATA/transport.json"
+    fi
+    return $rc
+}
+
 # ── Run analysis ──────────────────────────────────────────────────────────
 run_analyze() {
     echo ""
@@ -387,6 +404,7 @@ case "$COMMAND" in
         # Ordered by information density: decompose first (most informative),
         # saturation last (early-stops when system collapses).
         preflight || exit 1
+        [ -z "${SIM:-}" ] && { run_transport_witness || echo "  WARN: transport not established; see above"; }
         start_metrics
         trap stop_metrics EXIT
 
@@ -426,6 +444,11 @@ case "$COMMAND" in
 
     preflight)
         preflight
+        ;;
+
+    transport)
+        preflight || exit 1
+        run_transport_witness
         ;;
 
     metrics)

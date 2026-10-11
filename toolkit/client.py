@@ -116,45 +116,22 @@ def http_error(status, body):
         detail = detail.get("message", detail)
     return f"HTTP {status}: {str(detail)[:500]}".rstrip(": ")
 
-def detect_transport():
-    """Auto-detect the interconnect transport type.
+def witnessed_transport():
+    """The KV transfer transport recorded by transport.py, if it has run.
 
-    Checks UCX_TLS env var and probes for RDMA device files.
-    Returns one of: 'tcp', 'roce', 'infiniband', 'unknown'.
+    Configuration alone (UCX_TLS, RDMA resources) does not establish the
+    transport, and this process runs in the test-client pod, not in the vLLM
+    pods. The witness runs from the workstation, measures the vLLM pods, and
+    run.sh copies its transport.json into DATA_DIR.
     """
-    ucx_tls = os.environ.get("UCX_TLS", "")
-    # ^cuda_ipc means TCP-only (exclude CUDA IPC, no RDMA)
-    if ucx_tls == "^cuda_ipc":
-        return "tcp"
-    # Check for explicit RDMA transports in UCX_TLS
-    if "rc" in ucx_tls or "ud" in ucx_tls or "dc" in ucx_tls:
-        # Distinguish RoCE from InfiniBand via device type
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["ls", "/sys/class/infiniband/"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                devices = result.stdout.strip().split()
-                # Check link layer: IB vs Ethernet (RoCE)
-                for dev in devices:
-                    try:
-                        with open(f"/sys/class/infiniband/{dev}/ports/1/link_layer") as f:
-                            layer = f.read().strip()
-                            if layer == "InfiniBand":
-                                return "infiniband"
-                            elif layer == "Ethernet":
-                                return "roce"
-                    except OSError:
-                        continue
-                return "infiniband"  # default if we can't read link_layer
-        except Exception:
-            pass
-        return "unknown"
-    if not ucx_tls:
-        return "unknown"
-    return "tcp"
+    path = os.path.join(DATA_DIR, "transport.json")
+    try:
+        with open(path) as f:
+            witness = json.load(f)
+        return {key: witness.get(key) for key in ("transport", "scope", "witnessed_at")}
+    except (OSError, ValueError):
+        return {"transport": "not witnessed",
+                "hint": "run: ./toolkit/run.sh <cluster> transport"}
 
 
 def _discover_via_oc(label, ns):
@@ -868,7 +845,7 @@ def write_run_info(experiment, extra=None):
         "model": MODEL,
         "namespace": NS,
         "sim_mode": SIM,
-        "transport": detect_transport(),
+        "transport": witnessed_transport(),
         "baseline_url": BASELINE_URL,
         "disagg_d1_url": DISAGG_D1_URL,
         "disagg_d2_url": DISAGG_D2_URL,
