@@ -132,6 +132,74 @@ if [[ "$SIDECAR_SCHEME" != "http" && "$SIDECAR_SCHEME" != "https" ]]; then
     exit 1
 fi
 SIDECAR_SECURE_PROXY=false
+
+# ── KV transport (NIXL over UCX) ─────────────────────────────────────────
+# KV_TRANSPORT=tcp   pod network; UCX_TLS=^cuda_ipc (the default).
+# KV_TRANSPORT=rdma  RoCE/InfiniBand verbs on the pod network: requests
+#   RDMA_RESOURCE_NAME, adds IPC_LOCK (memory registration), runs as
+#   RDMA_SERVICE_ACCOUNT (its SCC must allow IPC_LOCK), and defaults
+#   UCX_TLS=rc,cuda so UCX cannot fall back to TCP for the payload.
+#   UCX_NET_DEVICES is required (e.g. mlx5_6:1); UCX_IB_GID_INDEX,
+#   UCX_IB_ADDR_TYPE and UCX_IB_ROCE_REACHABILITY_MODE are passed through.
+# TRANSPORT_LOG=1 makes UCX log the protocol it selects (transport/device per
+# operation), the layer-2 evidence toolkit/transport.py reports.
+KV_TRANSPORT="${KV_TRANSPORT:-tcp}"
+TRANSPORT_LOG="${TRANSPORT_LOG:-0}"
+# Always name the service account. Omitting it does not reset it: the API
+# server keeps the deprecated spec.serviceAccount from an earlier apply, so
+# switching from rdma to tcp would keep the RDMA account, which without
+# IPC_LOCK is admitted under a restricted SCC (random UID, unwritable $HOME).
+SERVICE_ACCOUNT_LINE="      serviceAccountName: default
+"
+RDMA_RESOURCE_LINE=""
+VLLM_SECURITY_CONTEXT=""
+ucx_env_var() {
+    UCX_ENV+="        - name: $1
+          value: \"$2\"
+"
+}
+UCX_ENV=""
+case "$KV_TRANSPORT" in
+    tcp)
+        ucx_env_var UCX_TLS "${UCX_TLS:-^cuda_ipc}"
+        ;;
+    rdma)
+        RDMA_RESOURCE_NAME="${RDMA_RESOURCE_NAME:-rdma/rdma_shared_device_a}"
+        if [[ -z "${UCX_NET_DEVICES:-}" ]]; then
+            echo "ERROR: KV_TRANSPORT=rdma needs UCX_NET_DEVICES (e.g. mlx5_6:1)"
+            exit 1
+        fi
+        for var in RDMA_RESOURCE_NAME RDMA_SERVICE_ACCOUNT UCX_TLS UCX_NET_DEVICES \
+                   UCX_IB_GID_INDEX UCX_IB_ADDR_TYPE UCX_IB_ROCE_REACHABILITY_MODE; do
+            val="${!var:-}"
+            if [[ -n "$val" && ! "$val" =~ ^[a-zA-Z0-9./_:,^-]+$ ]]; then
+                echo "ERROR: Invalid $var: $val"
+                exit 1
+            fi
+        done
+        RDMA_RESOURCE_LINE="            ${RDMA_RESOURCE_NAME}: \"1\"
+"
+        VLLM_SECURITY_CONTEXT="        securityContext:
+          capabilities:
+            add: [\"IPC_LOCK\"]
+"
+        if [[ -n "${RDMA_SERVICE_ACCOUNT:-}" ]]; then
+            SERVICE_ACCOUNT_LINE="      serviceAccountName: ${RDMA_SERVICE_ACCOUNT}
+"
+        fi
+        ucx_env_var UCX_TLS "${UCX_TLS:-rc,cuda}"
+        ucx_env_var UCX_NET_DEVICES "$UCX_NET_DEVICES"
+        [[ -n "${UCX_IB_GID_INDEX:-}" ]] && ucx_env_var UCX_IB_GID_INDEX "$UCX_IB_GID_INDEX"
+        [[ -n "${UCX_IB_ADDR_TYPE:-}" ]] && ucx_env_var UCX_IB_ADDR_TYPE "$UCX_IB_ADDR_TYPE"
+        [[ -n "${UCX_IB_ROCE_REACHABILITY_MODE:-}" ]] && \
+            ucx_env_var UCX_IB_ROCE_REACHABILITY_MODE "$UCX_IB_ROCE_REACHABILITY_MODE"
+        ;;
+    *)
+        echo "ERROR: KV_TRANSPORT must be 'tcp' or 'rdma' (got '$KV_TRANSPORT')"
+        exit 2
+        ;;
+esac
+[[ "$TRANSPORT_LOG" == "1" ]] && ucx_env_var UCX_PROTO_INFO "y"
 [[ "$SIDECAR_SCHEME" == "https" ]] && SIDECAR_SECURE_PROXY=true
 
 oc_apply() {
@@ -146,6 +214,7 @@ echo "Cluster:     $CLUSTER_DIR"
 echo "Namespace:   $NS"
 echo "Model:       $MODEL"
 echo "Topology:    ${PREFILL_REPLICAS}P + ${DECODE_REPLICAS}D"
+echo "KV transport: ${KV_TRANSPORT}${UCX_NET_DEVICES:+ (UCX_NET_DEVICES=$UCX_NET_DEVICES)}"
 echo "vLLM image:  $VLLM_IMAGE"
 echo "Sidecar:     $SIDECAR_IMAGE"
 if [[ "$GPU_ALLOCATION_MODE" == "dra" ]]; then
@@ -327,7 +396,7 @@ spec:
         llm-d-diagnostics.ai/model-server: "true"
         app.kubernetes.io/part-of: vllm-disagg
     spec:
-${GPU_POD_RESOURCE_CLAIMS}
+${SERVICE_ACCOUNT_LINE}${GPU_POD_RESOURCE_CLAIMS}
       containers:
       - name: vllm
         image: $VLLM_IMAGE
@@ -360,9 +429,7 @@ ${GPU_POD_RESOURCE_CLAIMS}
               fieldPath: status.podIP
         - name: VLLM_NIXL_SIDE_CHANNEL_PORT
           value: "$NIXL_PORT"
-        - name: UCX_TLS
-          value: "^cuda_ipc"
-        envFrom:
+${UCX_ENV}        envFrom:
         - configMapRef:
             name: vllm-model-config
         ports:
@@ -377,12 +444,12 @@ ${GPU_POD_RESOURCE_CLAIMS}
             cpu: "4"
             memory: 16Gi
 ${GPU_RESOURCE_REQUEST:+$GPU_RESOURCE_REQUEST
-}          limits:
+}${RDMA_RESOURCE_LINE}          limits:
             cpu: "4"
             memory: 16Gi
 ${GPU_RESOURCE_LIMIT:+$GPU_RESOURCE_LIMIT
-}${GPU_CONTAINER_RESOURCE_CLAIMS}
-        startupProbe:
+}${RDMA_RESOURCE_LINE}${GPU_CONTAINER_RESOURCE_CLAIMS}
+${VLLM_SECURITY_CONTEXT}        startupProbe:
           httpGet:
             path: /health
             port: 8000
@@ -514,7 +581,7 @@ spec:
         llm-d-diagnostics.ai/model-server: "true"
         app.kubernetes.io/part-of: vllm-disagg
     spec:
-${GPU_POD_RESOURCE_CLAIMS}
+${SERVICE_ACCOUNT_LINE}${GPU_POD_RESOURCE_CLAIMS}
       initContainers:
       # Native sidecar (restartPolicy: Always, K8s 1.29+/OCP 4.17+).
       # Proxies requests: client → sidecar:8000 → vllm:8001
@@ -585,9 +652,7 @@ ${GPU_POD_RESOURCE_CLAIMS}
               fieldPath: status.podIP
         - name: VLLM_NIXL_SIDE_CHANNEL_PORT
           value: "$NIXL_PORT"
-        - name: UCX_TLS
-          value: "^cuda_ipc"
-        envFrom:
+${UCX_ENV}        envFrom:
         - configMapRef:
             name: vllm-model-config
         ports:
@@ -602,12 +667,12 @@ ${GPU_POD_RESOURCE_CLAIMS}
             cpu: "4"
             memory: 16Gi
 ${GPU_RESOURCE_REQUEST:+$GPU_RESOURCE_REQUEST
-}          limits:
+}${RDMA_RESOURCE_LINE}          limits:
             cpu: "4"
             memory: 16Gi
 ${GPU_RESOURCE_LIMIT:+$GPU_RESOURCE_LIMIT
-}${GPU_CONTAINER_RESOURCE_CLAIMS}
-        startupProbe:
+}${RDMA_RESOURCE_LINE}${GPU_CONTAINER_RESOURCE_CLAIMS}
+${VLLM_SECURITY_CONTEXT}        startupProbe:
           httpGet:
             path: /health
             port: 8001

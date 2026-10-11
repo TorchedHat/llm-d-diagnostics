@@ -2452,6 +2452,31 @@ def kv_accounting(data_dir):
     return lines + warnings
 
 
+def transport_summary(data_dir):
+    """Header lines stating the witnessed KV transport (transport.json)."""
+    import json
+    path = os.path.join(data_dir, "transport.json")
+    try:
+        with open(path) as f:
+            witness = json.load(f)
+    except (OSError, ValueError):
+        return ["KV transport: NOT WITNESSED. Latency and bandwidth numbers cannot be "
+                "attributed to TCP or RDMA (run: ./toolkit/run.sh <cluster> transport)"]
+    lines = [f"KV transport: {witness.get('transport')} "
+             f"({witness.get('scope')}, witnessed {witness.get('witnessed_at')})"]
+    for pair in witness.get("pairs", []):
+        ratio = pair.get("netdev_ratio")
+        gbps = pair.get("nixl_gbps")
+        where = "same-node" if pair.get("same_node") else "cross-node"
+        lines.append(
+            f"  {pair.get('prefill_node', '?').rsplit('-', 1)[-1]} -> "
+            f"{pair.get('decode_node', '?').rsplit('-', 1)[-1]} {where}: "
+            f"{pair.get('transport')}, interface/NIXL bytes "
+            f"{'n/a' if ratio is None else f'{ratio:.2f}'}, "
+            f"{'n/a' if not gbps else f'{gbps:.2f} GB/s'}")
+    return lines
+
+
 def main():
     data_dir = sys.argv[1] if len(sys.argv) > 1 else "data"
 
@@ -2478,6 +2503,8 @@ def main():
 
     print("llm-d Diagnostics — Analysis")
     print(f"Data directory: {data_dir}")
+    for line in transport_summary(data_dir):
+        print(line)
     print()
     accounting = kv_accounting(data_dir)
     for line in accounting:
