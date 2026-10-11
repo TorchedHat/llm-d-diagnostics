@@ -100,6 +100,7 @@ values — you don't need to edit the yaml. If deploying manually with
 | `GPU_ALLOCATION_MODE` | `classic` | GPU request mechanism: `dra` or `classic` |
 | `GPU_COUNT` | `1` | GPUs requested per vLLM pod; used for vLLM tensor parallelism |
 | `GPU_RESOURCE_NAME` | `nvidia.com/gpu` | Classic device-plugin resource name; ignored in DRA mode |
+| `GPU_DEVICE_CLASS` | `gpu.nvidia.com` | DRA DeviceClass for a created `gpu-<GPU_COUNT>` template; ignored in classic mode |
 | `SIDECAR_SCHEME` | `http` | Sidecar listener and toolkit URL scheme (`http` or `https`) |
 | `MODEL_CACHE_SIZE` | `50Gi` | PVC size for model weights cache |
 | `STORAGE_CLASS` | (cluster default) | Kubernetes StorageClass for model-cache PVC |
@@ -109,11 +110,16 @@ values — you don't need to edit the yaml. If deploying manually with
 
 `STORAGE_CLASS` must support `ReadWriteMany` if pods are spread across
 nodes (anti-affinity). On OpenShift OCS, use `ocs-storagecluster-cephfs`.
-If unset, the cluster's default StorageClass is used.
+If unset, the cluster's default StorageClass is used; on many clusters that
+is block storage (ReadWriteOnce only), and `deploy.sh` stops with the
+provisioner's error instead of waiting for pods that cannot start.
 
 In DRA mode, each vLLM pod references the namespaced `ResourceClaimTemplate`
 named `gpu-${GPU_COUNT}` and attaches the resulting claim to its vLLM
-container. The template must exist before deployment. For example,
+container. `deploy.sh` reuses an existing template of that name, so a
+template that selects specific devices is kept; otherwise it creates one
+requesting `GPU_COUNT` devices of `GPU_DEVICE_CLASS` (default
+`gpu.nvidia.com`). For example,
 `GPU_COUNT=2` uses `resourceClaimTemplateName: gpu-2` and sets vLLM tensor
 parallelism to 2. Classic mode requests `GPU_COUNT` units of
 `GPU_RESOURCE_NAME` instead.

@@ -116,6 +116,39 @@ REMOTE_DIR="/scripts/toolkit"
 REMOTE_DATA="$REMOTE_DIR/data/$(basename "$CLUSTER_DIR")"
 
 # ── Preflight check ───────────────────────────────────────────────────────
+check_network_policies() {
+    local policies
+    policies=$(oc get networkpolicy -n "$NS" -o json 2>/dev/null | python3 -c '
+import json, sys
+def selector(sel):
+    parts = [f"{k}={v}" for k, v in sorted(sel.get("matchLabels", {}).items())]
+    for e in sel.get("matchExpressions", []):
+        key, vals = e["key"], ",".join(e.get("values", []))
+        parts.append({"In": f"{key} in ({vals})", "NotIn": f"{key} notin ({vals})",
+                      "Exists": key, "DoesNotExist": f"!{key}"}[e["operator"]])
+    return ",".join(parts)
+for p in json.load(sys.stdin).get("items", []):
+    print(p["metadata"]["name"] + "|" + selector(p["spec"].get("podSelector", {})))
+' 2>/dev/null) || return 0
+
+    local found=false name sel pods
+    while IFS='|' read -r name sel; do
+        [ -z "$name" ] && continue
+        pods=$(oc get pods -n "$NS" \
+            -l "app.kubernetes.io/part-of in (vllm-disagg,vllm-disagg-sim)${sel:+,$sel}" \
+            -o name 2>/dev/null | sed 's#^pod/##' | tr '\n' ' ')
+        if [ -n "$pods" ]; then
+            echo "  WARN: NetworkPolicy '$name' selects: $pods"
+            found=true
+        fi
+    done <<< "$policies"
+    if [ "$found" = true ]; then
+        echo "        Traffic to these pods is limited to what the policy allows."
+        echo "        It must allow HTTP (8000, 8001) and the NIXL side channel"
+        echo "        (${NIXL_PORT:-5557}). Inspect: oc get networkpolicy -n $NS -o yaml"
+    fi
+}
+
 preflight() {
     echo "=== Preflight Check ==="
     local ok=true
@@ -133,7 +166,11 @@ preflight() {
     oc exec "$POD" -n "$NS" -- mkdir -p "$REMOTE_DIR" "$REMOTE_DATA"
     oc cp "$SCRIPT_DIR/" "$NS/$POD:$(dirname $REMOTE_DIR)/"
 
-    # 3. Verify each endpoint with a single request
+    # 3. Warn about NetworkPolicies that select the model pods. A leftover
+    #    policy from a partition experiment silently blocks HTTP or NIXL.
+    check_network_policies
+
+    # 4. Verify each endpoint with a single request
     local env_vars="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DATA PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME"
     [ -n "${SIM:-}" ] && env_vars="$env_vars SIM=$SIM"
 
@@ -260,13 +297,30 @@ stop_metrics() {
         fi
         rm -f "$METRICS_PID_FILE"
     fi
+    # Killing the local `oc exec` does not stop the collector inside the pod.
+    oc exec "$POD" -n "$NS" -- pkill -f metrics_collector.py 2>/dev/null || true
 }
 
 # ── Copy results back ─────────────────────────────────────────────────────
 copy_results() {
+    # Stop writers first: copying a directory that changes mid-read is how
+    # `oc cp` fails with "unexpected EOF". A tar stream over exec is also
+    # more reliable than `oc cp` for large directories.
+    stop_metrics
     echo "Copying results from pod..."
-    oc cp "$NS/$POD:$REMOTE_DATA/" "$DATA_DIR/"
-    echo "Results saved to $DATA_DIR/"
+    mkdir -p "$DATA_DIR"
+    local attempt
+    for attempt in 1 2 3; do
+        if oc exec "$POD" -n "$NS" -- tar czf - -C "$REMOTE_DATA" . \
+                | tar xzf - -C "$DATA_DIR"; then
+            echo "Results saved to $DATA_DIR/"
+            return 0
+        fi
+        echo "  copy attempt $attempt failed; retrying..."
+        sleep 5
+    done
+    echo "ERROR: could not copy results; they remain in $POD:$REMOTE_DATA"
+    return 1
 }
 
 # ── Run analysis ──────────────────────────────────────────────────────────

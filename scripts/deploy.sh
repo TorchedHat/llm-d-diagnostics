@@ -68,6 +68,7 @@ SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.11.
 GPU_ALLOCATION_MODE="${GPU_ALLOCATION_MODE:-classic}"
 GPU_COUNT="${GPU_COUNT:-1}"
 GPU_RESOURCE_NAME="${GPU_RESOURCE_NAME:-nvidia.com/gpu}"
+GPU_DEVICE_CLASS="${GPU_DEVICE_CLASS:-gpu.nvidia.com}"
 SIDECAR_SCHEME="${SIDECAR_SCHEME:-http}"
 MODEL_CACHE_SIZE="${MODEL_CACHE_SIZE:-50Gi}"
 
@@ -97,6 +98,10 @@ done
 
 case "$GPU_ALLOCATION_MODE" in
     dra)
+        if ! [[ "$GPU_DEVICE_CLASS" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+            echo "ERROR: Invalid GPU_DEVICE_CLASS: $GPU_DEVICE_CLASS"
+            exit 1
+        fi
         GPU_CLAIM_TEMPLATE="gpu-${GPU_COUNT}"
         GPU_POD_RESOURCE_CLAIMS="      resourceClaims:
       - name: gpu
@@ -164,11 +169,31 @@ elif ! oc get namespace "$NS" &>/dev/null; then
     oc create namespace "$NS"
 fi
 
-if [[ "$MODE" != "sim" && "$GPU_ALLOCATION_MODE" == "dra" && "$DRY_RUN" != "client" ]]; then
-    if ! oc get resourceclaimtemplate "$GPU_CLAIM_TEMPLATE" -n "$NS" &>/dev/null; then
-        echo "ERROR: DRA ResourceClaimTemplate '$GPU_CLAIM_TEMPLATE' not found in namespace '$NS'."
-        echo "Create the matching gpu-<GPU_COUNT> template before deploying."
-        exit 1
+if [[ "$MODE" != "sim" && "$GPU_ALLOCATION_MODE" == "dra" ]]; then
+    # Reuse an existing template (it may select specific devices); otherwise
+    # create one requesting GPU_COUNT devices of GPU_DEVICE_CLASS.
+    if [[ "$DRY_RUN" == "client" ]] || \
+       ! oc get resourceclaimtemplate "$GPU_CLAIM_TEMPLATE" -n "$NS" &>/dev/null; then
+        echo "Creating DRA ResourceClaimTemplate $GPU_CLAIM_TEMPLATE ($GPU_COUNT x $GPU_DEVICE_CLASS)..."
+        oc_apply -n "$NS" -f - <<EOF
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: $GPU_CLAIM_TEMPLATE
+  labels:
+    app.kubernetes.io/part-of: vllm-disagg
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          allocationMode: ExactCount
+          count: $GPU_COUNT
+          deviceClassName: $GPU_DEVICE_CLASS
+EOF
+    else
+        echo "Using existing DRA ResourceClaimTemplate $GPU_CLAIM_TEMPLATE"
     fi
 fi
 
@@ -800,6 +825,22 @@ ELAPSED=0
 EXPECTED=$((PREFILL_REPLICAS + DECODE_REPLICAS))
 
 while [ $ELAPSED -lt $TIMEOUT ]; do
+    # A StorageClass without ReadWriteMany support never binds; fail now
+    # instead of waiting out the timeout with every vLLM pod Pending.
+    if [[ "$(oc get pvc model-cache -n "$NS" -o jsonpath='{.status.phase}')" == "Pending" ]]; then
+        PVC_ERROR=$(oc get events -n "$NS" \
+            --field-selector involvedObject.kind=PersistentVolumeClaim,involvedObject.name=model-cache,reason=ProvisioningFailed \
+            -o jsonpath='{.items[-1:].message}' 2>/dev/null || true)
+        if [[ -n "$PVC_ERROR" ]]; then
+            echo ""
+            echo "ERROR: PVC model-cache cannot be provisioned:"
+            echo "  $PVC_ERROR"
+            echo "  It needs a ReadWriteMany StorageClass. Set STORAGE_CLASS in env.sh"
+            echo "  (list them with: oc get storageclass), then delete the PVC and re-run:"
+            echo "    oc delete pvc model-cache -n $NS"
+            exit 1
+        fi
+    fi
     READY=0
     for deployment in vllm-prefill vllm-decode; do
         replicas="$(oc get deployment "$deployment" -n "$NS" -o jsonpath='{.spec.replicas}')"
