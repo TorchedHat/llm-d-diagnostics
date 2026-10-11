@@ -145,7 +145,12 @@ SIDECAR_SECURE_PROXY=false
 # operation), the layer-2 evidence toolkit/transport.py reports.
 KV_TRANSPORT="${KV_TRANSPORT:-tcp}"
 TRANSPORT_LOG="${TRANSPORT_LOG:-0}"
-SERVICE_ACCOUNT_LINE=""
+# Always name the service account. Omitting it does not reset it: the API
+# server keeps the deprecated spec.serviceAccount from an earlier apply, so
+# switching from rdma to tcp would keep the RDMA account, which without
+# IPC_LOCK is admitted under a restricted SCC (random UID, unwritable $HOME).
+SERVICE_ACCOUNT_LINE="      serviceAccountName: default
+"
 RDMA_RESOURCE_LINE=""
 VLLM_SECURITY_CONTEXT=""
 ucx_env_var() {
