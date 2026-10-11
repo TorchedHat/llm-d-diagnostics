@@ -7,6 +7,7 @@ missing from REMOTE_ENV is silently replaced by the script's default.
 import glob
 import os
 import re
+import subprocess
 import unittest
 
 TOOLKIT = os.path.join(os.path.dirname(__file__), "..")
@@ -33,6 +34,33 @@ class TestRunShForwarding(unittest.TestCase):
 
         missing = sorted(used - forwarded)
         self.assertEqual(missing, [], f"add to EXPERIMENT_ENV_VARS in run.sh: {missing}")
+
+
+class TestPreflightEndpoints(unittest.TestCase):
+    """needed_endpoints, extracted from run.sh and run under bash."""
+
+    def _needed(self, script, **env):
+        run_sh = _read(os.path.join(TOOLKIT, "run.sh"))
+        func = re.search(r"^needed_endpoints\(\) \{.*?^\}$", run_sh, re.S | re.M).group(0)
+        base = {"BASELINE_URL": "http://b", "DISAGG_D1_URL": "http://d1",
+                "DISAGG_D2_URL": "http://d2", "EPP_URL": "", "PATH": os.environ["PATH"]}
+        out = subprocess.run(["bash", "-c", func + '\nneeded_endpoints "$1"', "_", script],
+                             env=base | env, capture_output=True, text=True, check=True)
+        return [line.split("|")[0] for line in out.stdout.split()]
+
+    def test_calibrate_needs_one_instance(self):
+        self.assertEqual(self._needed("exp18_calibrate.py"), ["calibrate"])
+
+    def test_configs_limit_the_probes(self):
+        self.assertEqual(self._needed("exp16_per_token_trace.py", CONFIGS="BASELINE"), ["baseline"])
+        self.assertEqual(self._needed("exp12_tput_outlen.py", CONFIGS="DISAGG-2D"),
+                         ["manual-decode", "manual-decode-2"])
+
+    def test_default_probes_everything_configured(self):
+        self.assertEqual(self._needed("exp1_latency.py", EPP_URL="http://e"),
+                         ["baseline", "manual-decode", "manual-decode-2", "epp"])
+        self.assertEqual(self._needed("exp1_latency.py"),
+                         ["baseline", "manual-decode", "manual-decode-2"])
 
 
 if __name__ == "__main__":

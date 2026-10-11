@@ -114,6 +114,29 @@ POD="${TEST_CLIENT:-test-client}"
 REMOTE_DIR="/scripts/toolkit"
 
 # ── Preflight check ───────────────────────────────────────────────────────
+# Endpoints an experiment script needs, one per line as name|url|route:
+# calibrate uses one monolithic instance; with CONFIGS set, only the listed
+# configurations are probed; otherwise every configured endpoint.
+needed_endpoints() {
+    local script="${1:-}"
+    if [[ "$script" == exp18_calibrate.py ]]; then
+        echo "calibrate|${CALIBRATE_URL:-$BASELINE_URL}|none"
+        return
+    fi
+    local configs="${CONFIGS:-BASELINE,DISAGG,EPP}"
+    [[ ",$configs," == *,BASELINE,* ]] && echo "baseline|$BASELINE_URL|none"
+    if [[ "$configs" == *DISAGG* ]]; then
+        echo "manual-decode|$DISAGG_D1_URL|manual"
+        if [[ "$DISAGG_D2_URL" != "$DISAGG_D1_URL" ]]; then
+            echo "manual-decode-2|$DISAGG_D2_URL|manual"
+        fi
+    fi
+    if [[ -n "$EPP_URL" && "$configs" == *EPP* ]]; then
+        echo "epp|$EPP_URL|epp"
+    fi
+    return 0
+}
+
 preflight() {
     echo "=== Preflight Check ==="
     local ok=true
@@ -135,16 +158,8 @@ preflight() {
     local env_vars="MODEL=$MODEL NS=$NS DATA_DIR=$REMOTE_DIR/data PREFILL_HOST=$PREFILL_HOST SIDECAR_SCHEME=$SIDECAR_SCHEME"
     [ -n "${SIM:-}" ] && env_vars="$env_vars SIM=$SIM"
 
-    local endpoints=(
-        "baseline|$BASELINE_URL|none"
-        "manual-decode|$DISAGG_D1_URL|manual"
-    )
-    if [[ "$DISAGG_D2_URL" != "$DISAGG_D1_URL" ]]; then
-        endpoints+=("manual-decode-2|$DISAGG_D2_URL|manual")
-    fi
-    if [ -n "$EPP_URL" ]; then
-        endpoints+=("epp|$EPP_URL|epp")
-    fi
+    local endpoints
+    mapfile -t endpoints < <(needed_endpoints "${1:-}")
     for endpoint in "${endpoints[@]}"; do
         IFS='|' read -r name url route <<< "$endpoint"
 
@@ -291,7 +306,7 @@ run_single() {
     local label="$1"
     local script="$2"
 
-    preflight || exit 1
+    preflight "$script" || exit 1
     start_metrics
     trap stop_metrics EXIT
 
