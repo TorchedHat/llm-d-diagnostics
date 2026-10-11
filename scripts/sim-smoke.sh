@@ -99,17 +99,20 @@ if {r["run"] for r in e12 if r["concurrency"] == "4"} != {"1", "2", "3", "4"}:
     problems.append("exp12: concurrency 4 did not run one full batch of 4")
 c1 = [r for r in e12 if r["concurrency"] == "1"]
 ttft = statistics.median(float(r["ttft_ms"]) for r in c1)
-itl = statistics.median(float(r["itl_mean_ms"]) for r in c1)
+# Only the 10-token outputs: there, dividing by n tokens instead of the n-1
+# gaps reads 9.0 ms (and folding TTFT into the mean ~21 ms), outside the band.
+itl = statistics.median(float(r["itl_mean_ms"]) for r in c1 if r["max_tokens"] == "10")
 # The simulator's tokenizer may count the prompt differently; allow 70-200 ms.
+# (The calibration's fixed-cost check below catches a constant TTFT offset.)
 if not 70 <= ttft <= 200:
     problems.append(f"exp12: TTFT at c=1 is {ttft:.1f} ms, expected ~120 ms")
-if not 8 <= itl <= 14:
-    problems.append(f"exp12: mean ITL at c=1 is {itl:.1f} ms, expected ~10 ms")
+if not 9.5 <= itl <= 11.5:
+    problems.append(f"exp12: mean ITL at c=1, 10 tokens, is {itl:.1f} ms, expected ~10 ms")
 
 all16 = rows("exp16")
 e16 = [r for r in all16 if r["concurrency"] == "1" and int(r["token_idx"]) > 0]
 gap = statistics.median(float(r["gap_ms"]) for r in e16)
-if not 8 <= gap <= 14:
+if not 9.5 <= gap <= 11.5:
     problems.append(f"exp16: median gap at c=1 is {gap:.1f} ms, expected ~10 ms")
 # Steady load: at c=4, requests after the first wave start with 3 others in flight.
 steady = {(r["config"], r["run"]) for r in all16
@@ -122,18 +125,31 @@ if not runs4 or len(steady) < 0.8 * len(runs4):
 import json
 cal = json.load(open(f"{d}/calibration.json"))
 steps = {b: s for b, c, s in cal.get("decode_points", []) if c == min(p[1] for p in cal["decode_points"])}
+# The simulator's step time is ITL * (1 + (n - 1) / 7) for n requests (load
+# factor 2 at max-num-seqs 8): weight 10 * 6/7 = 8.57 ms, 1.43 ms per request.
+# The fitted terms are what the planning model uses, so check them, not only
+# the raw points: a fit with the two terms swapped or mis-scaled would pass
+# the point checks.
+w, per_req = cal.get("decode_weight_s"), cal.get("decode_per_request_s")
 checks = [
-    ("prefill fixed cost", cal.get("prefill_t0_s"), 0.010, 0.030),       # configured 20 ms
+    ("prefill fixed cost", cal.get("prefill_t0_s"), 0.015, 0.025),       # configured 20 ms
     ("prefill per token", cal.get("prefill_a_s_per_token"), 8e-5, 1.2e-4),  # configured 100 us
     ("decode step at B=1", steps.get(1), 0.008, 0.013),  # 10 ms
     ("decode step at B=8", steps.get(8), 0.017, 0.024),  # 20 ms
     # The simulator's step time does not depend on context: KV term ~0.
     ("decode KV term", abs(cal.get("decode_kv_s_per_token", 1.0)), 0.0, 2e-6),
+    ("decode weight term", w, 0.0077, 0.0095),            # 8.57 ms
+    ("decode per-request term", per_req, 0.00121, 0.00165),  # 1.43 ms
+    # The fit must reproduce the measured step at B=8.
+    ("decode fit at B=8 / measured", (w + 8 * per_req) / steps[8] if w and per_req and steps.get(8) else None,
+     0.95, 1.05),
     ("KV capacity", cal.get("kv_capacity_tokens"), 16384, 16384),
 ]
 for name, value, lo, hi in checks:
     if value is None or not lo <= value <= hi:
         problems.append(f"exp18: {name} = {value}, expected {lo}..{hi}")
+# The simulator never slows decode for a prefill, so it has no true overlap
+# value: this checks only that the phase runs. theta needs a GPU.
 if cal.get("overlap_theta") is None:
     problems.append("exp18: overlap step did not run")
 
