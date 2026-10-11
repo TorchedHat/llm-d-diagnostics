@@ -21,3 +21,29 @@ jobs:
       - run: pytest toolkit/tests/ advisor/tests/ -v
       - run: ruff check toolkit/ advisor/
       - run: mypy toolkit/ advisor/
+
+  sim-smoke:
+    # End-to-end run of the streaming experiments against llm-d-inference-sim
+    # (no GPU, no cluster). Keep SIM_VERSION in step with manifests/sim/.
+    runs-on: ubuntu-latest
+    env:
+      SIM_VERSION: v0.11.2
+      SIM_COMMIT: 7639395743c76f1cb37222981b33e8ea56cce69b  # the commit SIM_VERSION pointed to; tags can move
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+      - name: Build llm-d-inference-sim
+        run: |
+          git init -q "$RUNNER_TEMP/sim"
+          cd "$RUNNER_TEMP/sim"
+          git fetch -q --depth 1 https://github.com/llm-d/llm-d-inference-sim "$SIM_COMMIT"
+          git checkout -q FETCH_HEAD
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/llm-d-inference-sim" cmd/llm-d-inference-sim/main.go
+      - name: Run sim smoke test
+        run: SIM_BIN="$RUNNER_TEMP/llm-d-inference-sim" ./scripts/sim-smoke.sh

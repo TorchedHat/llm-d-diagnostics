@@ -2119,69 +2119,126 @@ def analyze_exp11(data_dir):
         print()
 
 
-# ── Experiment 12: Throughput vs Output Length ────────────────────────────────
+# ── Helpers for streaming experiments (exp12, exp16) ────────────────────────
 
-def analyze_exp12(data_dir):
-    """Experiment 12: Throughput vs Output Length — Decode-Dominated Regime."""
-    rows = load_csv(os.path.join(data_dir, "exp12-results.csv"))
-    if not rows:
-        print("  No data found")
-        return
+def _tokens(r):
+    """Output tokens of one request: the server's count if reported, else streamed chunks."""
+    return safe_int(r.get("server_completion_tokens")) or safe_int(r.get("completion_tokens"))
 
-    ok = [r for r in rows if get_status(r) == 200]
+
+def _quality(rows, ok):
     errs = len(rows) - len(ok)
     if errs:
         print(f"  Data quality: {errs}/{len(rows)} errors ({errs/len(rows):.0%})")
     else:
         print(f"  Data quality: {len(rows)} rows, 0 errors")
+    short = sum(1 for r in ok if _tokens(r) < safe_int(r.get("max_tokens")))
+    if short:
+        print(f"  WARNING: {short}/{len(ok)} requests stopped before max_tokens "
+              f"(run with IGNORE_EOS=1 to control output length)")
+    merged = sum(1 for r in ok
+                 if safe_int(r.get("server_completion_tokens")) > safe_int(r.get("completion_tokens")))
+    if merged:
+        print(f"  NOTE: {merged}/{len(ok)} requests had tokens with empty text; their time is "
+              f"merged into the next streamed gap")
     print()
 
-    configs = sorted(set(r["config"] for r in ok))
-    max_tokens_vals = sorted(set(safe_int(r["max_tokens"]) for r in ok))
 
-    by_key = defaultdict(lambda: {"ttft": [], "total": []})
+def _steady_window(rows, request_key):
+    """Keep requests from the steady middle of each steady-mode cell.
+
+    In LOAD_MODE=steady, the first and last `concurrency` requests of a cell
+    (by start order, column `run`) ramp the load up and down. Batch-mode rows
+    and rows without a load_mode column are kept as they are.
+    Returns (kept_rows, dropped_request_count).
+    """
+    max_run = defaultdict(int)
+    for r in rows:
+        if r.get("load_mode") == "steady":
+            k = request_key(r)
+            max_run[k] = max(max_run[k], safe_int(r["run"]))
+    kept, dropped = [], set()
+    for r in rows:
+        if r.get("load_mode") != "steady":
+            kept.append(r)
+            continue
+        c = safe_int(r["concurrency"])
+        run = safe_int(r["run"])
+        if c < run <= max_run[request_key(r)] - c:
+            kept.append(r)
+        else:
+            dropped.add((request_key(r), run))
+    return kept, len(dropped)
+
+
+# ── Experiment 12: Throughput vs Output Length ────────────────────────────────
+
+def analyze_exp12(data_dir):
+    """Experiment 12: TTFT, ITL and total latency vs output length."""
+    rows = load_csv(os.path.join(data_dir, "exp12-results.csv"))
+    if not rows:
+        print("  No data found")
+        return
+
+    rows, dropped = _steady_window(
+        rows, lambda r: (r["config"], r["concurrency"], r["prompt_tokens_target"], r["max_tokens"]))
+    ok = [r for r in rows if get_status(r) == 200]
+    _quality(rows, ok)
+    if dropped:
+        print(f"  Steady load: dropped {dropped} ramp-up/ramp-down requests "
+              f"(first and last `concurrency` per cell)")
+        print()
+    streaming = any(r.get("streaming") == "1" for r in ok)
+    if not streaming:
+        print("  Non-streaming data: ttft_ms is close to total_ms, so 'Decode p50' is not")
+        print("  meaningful. Re-run with STREAMING=1 for true TTFT and ITL.")
+        print()
+
+    cell = defaultdict(lambda: {"ttft": [], "itl": [], "total": []})
     for r in ok:
-        key = (r["config"], safe_int(r["max_tokens"]))
-        by_key[key]["ttft"].append(safe_float(r["ttft_ms"]))
-        by_key[key]["total"].append(safe_float(r["total_ms"]))
+        key = (safe_int(r["concurrency"]), safe_int(r["prompt_tokens_target"]),
+               safe_int(r["max_tokens"]), r["config"])
+        cell[key]["ttft"].append(safe_float(r["ttft_ms"]))
+        cell[key]["total"].append(safe_float(r["total_ms"]))
+        itl = safe_float(r.get("itl_mean_ms"))
+        if itl > 0:
+            cell[key]["itl"].append(itl)
 
-    print(f"  {'Config':>12} | {'MaxTok':>6} | {'n':>4} | {'TTFT p50':>9} | "
-          f"{'Total p50':>10} | {'Decode p50':>10} | {'CV(total)':>9}")
-    print(f"  {'-'*12}-+-{'-'*6}-+-{'-'*4}-+-{'-'*9}-+-"
-          f"{'-'*10}-+-{'-'*10}-+-{'-'*9}")
-
-    for cfg in configs:
-        for mt in max_tokens_vals:
-            d = by_key.get((cfg, mt))
-            if not d or not d["ttft"]:
-                continue
-            s_ttft = stats(d["ttft"])
-            s_total = stats(d["total"])
-            decode_ms = s_total["median"] - s_ttft["median"]
-            print(f"  {cfg:>12} | {mt:>6} | {s_ttft['n']:>4} | "
-                  f"{s_ttft['median']:>7.1f}ms | {s_total['median']:>8.1f}ms | "
-                  f"{decode_ms:>8.1f}ms | {s_total['cv']:>.3f}")
+    print(f"  {'c':>3} | {'prompt':>6} | {'out':>5} | {'Config':>10} | {'n':>4} | "
+          f"{'TTFT p50':>9} | {'ITL p50':>8} | {'Total p50':>10} | {'Decode p50':>10} | "
+          f"{'CV(total)':>9}")
+    for key in sorted(cell):
+        c, s, out, cfg = key
+        d = cell[key]
+        s_ttft, s_total = stats(d["ttft"]), stats(d["total"])
+        itl = f"{stats(d['itl'])['median']:>6.1f}ms" if d["itl"] else f"{'-':>8}"
+        print(f"  {c:>3} | {s:>6} | {out:>5} | {cfg:>10} | {s_total['n']:>4} | "
+              f"{s_ttft['median']:>7.1f}ms | {itl} | {s_total['median']:>8.1f}ms | "
+              f"{s_total['median'] - s_ttft['median']:>8.1f}ms | {s_total['cv']:>9.3f}")
     print()
 
-    baseline_cfg = "BASELINE"
-    if baseline_cfg in configs:
-        print("  Disagg overhead fraction of total request time:")
-        for mt in max_tokens_vals:
-            bl = by_key.get((baseline_cfg, mt))
+    configs = sorted(set(k[3] for k in cell))
+    if "BASELINE" in configs and len(configs) > 1:
+        print("  Per-request latency, config vs BASELINE. BASELINE is one vLLM instance;")
+        print("  DISAGG configs use more GPUs, so this is not throughput per GPU.")
+        for c, s, out in sorted(set(k[:3] for k in cell)):
+            bl = cell.get((c, s, out, "BASELINE"))
             if not bl or not bl["total"]:
                 continue
             bl_total = stats(bl["total"])["median"]
             for cfg in configs:
-                if cfg == baseline_cfg:
-                    continue
-                d = by_key.get((cfg, mt))
-                if not d or not d["total"]:
+                d = cell.get((c, s, out, cfg))
+                if cfg == "BASELINE" or not d or not d["total"]:
                     continue
                 cfg_total = stats(d["total"])["median"]
                 overhead = cfg_total - bl_total
-                pct_of_total = overhead / cfg_total * 100 if cfg_total > 0 else 0
-                print(f"    {cfg} @ max_tokens={mt}: overhead={overhead:.0f}ms "
-                      f"({pct_of_total:.0f}% of total)")
+                pct = overhead / cfg_total * 100 if cfg_total > 0 else 0
+                itl_part = ""
+                if bl["itl"] and d["itl"]:
+                    itl_part = (f", ITL ratio BASELINE/config "
+                                f"{stats(bl['itl'])['median'] / stats(d['itl'])['median']:.2f}")
+                print(f"    c={c} prompt={s} out={out} {cfg}: overhead {overhead:.0f}ms "
+                      f"({pct:.0f}% of total){itl_part}")
         print()
 
 
@@ -2391,6 +2448,166 @@ def analyze_exp14(data_dir):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+# ── Experiment 16: Per-Token ITL Trace ──────────────────────────────────────
+
+def analyze_exp16(data_dir):
+    """Experiment 16: distribution of inter-token gaps, including the longest pause."""
+    rows = load_csv(os.path.join(data_dir, "exp16-results.csv"))
+    if not rows:
+        print("  No data found")
+        return
+    rows, dropped = _steady_window(rows, lambda r: (r["config"], r["concurrency"]))
+    failed = [r for r in rows if safe_int(r["token_idx"], -1) < 0]
+    ok = [r for r in rows if safe_int(r["token_idx"], -1) >= 0]
+    n_requests = len(set((r["config"], r["concurrency"], r["run"]) for r in ok))
+    chunks = defaultdict(int)
+    server = {}
+    multi = set()
+    for r in ok:
+        k = (r["config"], r["concurrency"], r["run"], safe_int(r["max_tokens"]))
+        chunks[k] += safe_int(r.get("tokens_in_chunk")) or 1
+        server[k] = safe_int(r.get("server_completion_tokens"))
+        if safe_int(r.get("tokens_in_chunk")) > 1:
+            multi.add(k)
+    short = sum(1 for k, n in chunks.items() if (server[k] or n) < k[3])
+    merged = sum(1 for k, n in chunks.items() if server[k] > n)
+    if failed:
+        print(f"  Data quality: {len(failed)} failed requests, {n_requests} complete")
+    else:
+        print(f"  Data quality: {n_requests} complete requests, 0 failed")
+    served = sorted({(r["run"], r["config"], r["concurrency"]): safe_int(r.get("prompt_tokens_actual"))
+                     for r in ok}.values())
+    served = [n for n in served if n]
+    if served:
+        target = safe_int(ok[0]["prompt_tokens_target"])
+        print(f"  Prompt tokens (server count): median {served[len(served) // 2]} "
+              f"(target {target}, range {served[0]}-{served[-1]})")
+    if short:
+        print(f"  WARNING: {short}/{n_requests} requests stopped before max_tokens "
+              f"(run with IGNORE_EOS=1 to control output length)")
+    if merged:
+        print(f"  NOTE: {merged}/{n_requests} requests had tokens with empty text; their "
+              f"time is merged into the next gap")
+    if multi:
+        print(f"  NOTE: {len(multi)}/{n_requests} requests had chunks carrying several tokens "
+              f"(tokens_in_chunk > 1); each such gap spans several decode steps")
+    if dropped:
+        print(f"  Steady load: dropped {dropped} ramp-up/ramp-down requests")
+    slo_ms = safe_float(os.environ.get("ITL_SLO_MS", "50"), 50.0)
+    print(f"  ITL threshold for the 'gaps over' column: {slo_ms:.0f} ms (ITL_SLO_MS)")
+    print()
+
+    ttft = defaultdict(list)
+    gaps = defaultdict(list)
+    by_pos = defaultdict(lambda: defaultdict(list))
+    req_max = defaultdict(lambda: defaultdict(float))
+    for r in ok:
+        key = (r["config"], safe_int(r["concurrency"]))
+        idx = safe_int(r["token_idx"])
+        gap = safe_float(r["gap_ms"])
+        if idx == 0:
+            ttft[key].append(gap)
+            continue
+        gaps[key].append(gap)
+        bucket = "1-5" if idx <= 5 else ("6-20" if idx <= 20 else "21+")
+        by_pos[key][bucket].append(gap)
+        req_max[key][r["run"]] = max(req_max[key][r["run"]], gap)
+
+    print(f"  {'Config':>10} | {'c':>3} | {'TTFT p50':>9} | {'ITL p50':>8} | {'p90':>7} | "
+          f"{'p99':>7} | {'max':>8} | {'longest pause p50':>17} | {'gaps over':>9}")
+    for key in sorted(gaps):
+        cfg, c = key
+        g = stats(gaps[key])
+        longest = stats(list(req_max[key].values()))
+        over = sum(1 for x in gaps[key] if x > slo_ms) / len(gaps[key])
+        t = stats(ttft[key])["median"] if ttft[key] else float("nan")
+        print(f"  {cfg:>10} | {c:>3} | {t:>7.1f}ms | {g['p50']:>6.1f}ms | {g['p90']:>5.1f}ms | "
+              f"{g['p99']:>5.1f}ms | {g['max']:>6.1f}ms | {longest['median']:>15.1f}ms | "
+              f"{over:>8.1%}")
+    print()
+
+    print("  Mean gap by token position (under batch load, early gaps include the batch's")
+    print("  own prompt processing; under steady load they should be flat):")
+    for key in sorted(by_pos):
+        cfg, c = key
+        parts = []
+        for bucket in ("1-5", "6-20", "21+"):
+            vals = by_pos[key].get(bucket, [])
+            if vals:
+                parts.append(f"{bucket}: {sum(vals) / len(vals):.1f}ms")
+        print(f"    {cfg} c={c}: " + ", ".join(parts))
+    print()
+
+    for key in sorted(gaps):
+        if key[1] == 1:
+            cv = stats(gaps[key])["cv"]
+            note = "flat" if cv < 0.3 else "structured: check client/network before reading higher c"
+            print(f"  Instrument check, {key[0]} at c=1: gap CV {cv:.2f} ({note})")
+    print()
+
+
+# ── Experiment 18: One-GPU Calibration ──────────────────────────────────────
+
+def analyze_exp18(data_dir):
+    """Experiment 18: fitted calibration coefficients and their quality."""
+    import json
+    path = os.path.join(data_dir, "calibration.json")
+    if not os.path.exists(path):
+        print("  calibration.json not found")
+        return
+    with open(path) as fh:
+        cal = json.load(fh)
+
+    def ms(key):
+        return f"{cal[key] * 1000:.2f} ms" if cal.get(key) is not None else "not measured"
+
+    print(f"  Model: {cal.get('model')}   measured {cal.get('measured_at')}")
+    print()
+    if "prefill_a_s_per_token" in cal:
+        print(f"  Prefill:  TTFT(s) = {ms('prefill_t0_s')} + {cal['prefill_a_s_per_token'] * 1e6:.2f} us"
+              f" x s + {cal['prefill_b_s_per_token2'] * 1e9:.4f} ns x s^2"
+              f"   (R^2 {cal['prefill_fit_r2']:.4f}, {len(cal['prefill_points'])} lengths)")
+    else:
+        print("  Prefill:  not measured")
+    if "decode_weight_s" in cal:
+        print(f"  Decode:   step(B, ctx) = {ms('decode_weight_s')} + B x "
+              f"({cal['decode_per_request_s'] * 1000:.3f} ms + "
+              f"{cal['decode_kv_s_per_token'] * 1e9:.2f} ns x ctx)   "
+              f"(R^2 {cal['decode_fit_r2']:.4f})")
+        for batch, ctx, step in cal["decode_points"]:
+            print(f"            B={batch:<4} ctx={ctx:<7.0f} {step * 1000:.2f} ms")
+    else:
+        print("  Decode:   not measured")
+    kv = cal.get("kv_capacity_tokens")
+    print(f"  KV cache: {kv} tokens" if kv is not None else "  KV cache: not measured")
+    theta = cal.get("overlap_theta")
+    if theta is not None:
+        sigma = cal.get("overlap_theta_uncertainty")
+        print(f"  Overlap:  theta {theta:.2f}"
+              + (f" +/- {sigma:.2f}" if sigma is not None else "")
+              + " (0 = decode adds to the chunk, 1 = decode is free)")
+        runs = cal.get("overlap_runs") or []
+        if len(runs) > 1:
+            print(f"            runs {min(runs):.2f} to {max(runs):.2f} ({len(runs)} injections)")
+        if cal.get("overlap_mixed_step_s") is not None:
+            budget = cal.get("chunk_budget_tokens")
+            print(f"  Stall:    longest decode gap during a {cal.get('overlap_prompt_tokens')}-token "
+                  f"prompt {cal['overlap_mixed_step_s'] * 1000:.1f} ms vs decode step "
+                  f"{cal['overlap_decode_step_s'] * 1000:.1f} ms (chunk budget "
+                  f"{budget if budget else 'not recorded'})")
+    else:
+        print("  Overlap:  not measured")
+    transfer = cal.get("transfer")
+    if transfer:
+        print(f"  Transfer: {transfer['alpha_s'] * 1000:.1f} ms + bytes / "
+              f"{transfer['bw_bytes_per_s'] / 1e9:.2f} GB/s")
+    else:
+        print("  Transfer: not included (run exp5b, pass TRANSFER_ALPHA_S, TRANSFER_BW_BYTES_PER_S)")
+    for warning in cal.get("warnings", []):
+        print(f"  WARNING: {warning}")
+    print()
+
+
 def main():
     data_dir = sys.argv[1] if len(sys.argv) > 1 else "data"
 
@@ -2413,6 +2630,8 @@ def main():
         ("Experiment 12: Throughput vs Output Length", "exp12-results.csv", analyze_exp12),
         ("Experiment 13: Saturation Ceiling", "exp13-results.csv", analyze_exp13),
         ("Experiment 14: Overhead Under Load", "exp14-results.csv", analyze_exp14),
+        ("Experiment 16: Per-Token ITL Trace", "exp16-results.csv", analyze_exp16),
+        ("Experiment 18: One-GPU Calibration", "calibration.json", analyze_exp18),
     ]
 
     print("llm-d Diagnostics — Analysis")

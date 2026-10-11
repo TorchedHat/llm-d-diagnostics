@@ -336,7 +336,7 @@ class Exp10Row(TypedDict):
 
 
 class Exp11Row(TypedDict):
-    """Throughput scaling (exp11/exp12/exp13). Shared schema."""
+    """Throughput scaling (exp11/exp13). Shared schema."""
     experiment: str
     config: str
     prompt_tokens_target: str
@@ -349,6 +349,28 @@ class Exp11Row(TypedDict):
     prompt_tokens_actual: str
     completion_tokens: str
     target: str
+    error: str
+
+
+class Exp12Row(TypedDict):
+    """Throughput vs output length (exp12): Exp11Row plus streaming measurements."""
+    experiment: str
+    config: str
+    prompt_tokens_target: str
+    max_tokens: str
+    concurrency: str
+    run: str
+    ttft_ms: str
+    total_ms: str
+    status_code: str
+    prompt_tokens_actual: str
+    completion_tokens: str
+    target: str
+    streaming: str
+    load_mode: str
+    inflight_at_start: str
+    itl_mean_ms: str
+    server_completion_tokens: str
     error: str
 
 
@@ -365,6 +387,42 @@ class Exp14Row(TypedDict):
     status_code: str
     prompt_tokens_actual: str
     completion_tokens: str
+    error: str
+
+
+class Exp16Row(TypedDict):
+    """Per-token inter-token latency trace (exp16): one row per token."""
+    experiment: str
+    config: str
+    load_mode: str
+    prompt_tokens_target: str
+    prompt_tokens_actual: str  # server-reported (usage); the target can be far off
+    max_tokens: str
+    concurrency: str
+    run: str
+    inflight_at_start: str
+    token_idx: str
+    elapsed_ms: str
+    gap_ms: str
+    tokens_in_chunk: str  # tokens this timed chunk carried; "" if the server did not say
+    server_completion_tokens: str
+    status_code: str
+    target: str
+    error: str
+
+
+class Exp18Row(TypedDict):
+    """One-GPU calibration (exp18): one row per measurement."""
+    experiment: str
+    phase: str
+    metric: str
+    param: str
+    run: str
+    value: str
+    unit: str
+    prompt_tokens_actual: str
+    status_code: str
+    detail: str
     error: str
 
 
@@ -393,6 +451,12 @@ class TypedCSVWriter:
         self._file.flush()
 
     def write(self, row: dict) -> None:
+        self._check(row)
+        with self._lock:
+            self._writer.writerow(row)
+            self._file.flush()
+
+    def _check(self, row: dict) -> None:
         row_keys = set(row.keys())
         expected = set(self.fieldnames)
         if row_keys != expected:
@@ -406,8 +470,13 @@ class TypedCSVWriter:
             raise ValueError(
                 f"{self.row_type.__name__} schema mismatch: {', '.join(parts)}"
             )
+
+    def write_many(self, rows: list) -> None:
+        """Write several rows under one lock and one flush."""
+        for row in rows:
+            self._check(row)
         with self._lock:
-            self._writer.writerow(row)
+            self._writer.writerows(rows)
             self._file.flush()
 
     def close(self):

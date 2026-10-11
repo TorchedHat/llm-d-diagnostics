@@ -2,60 +2,86 @@
 """
 Experiment 12: Throughput vs Output Length
 
-Measures how disaggregated inference throughput changes with output length.
-As output length grows, decode time dominates and the fixed disagg overhead
-becomes a smaller fraction of total request time.
+Measures how TTFT, inter-token latency (ITL), total latency and throughput
+change with output length. As output length grows, decode time dominates
+and the fixed disagg overhead becomes a smaller fraction of total request
+time. Output length is also the cheapest knob for moving a workload between
+prefill-heavy and decode-heavy without redeploying.
 
-Sweeps max_tokens at fixed prompt length and concurrency. Each concurrent
-request uses a unique prompt (cache-busted).
+Sweeps max_tokens, optionally across several prompt lengths and concurrency
+levels. Each request uses a unique prompt (cache-busted per run).
+
+Measurement:
+    STREAMING=1 (default): requests stream, so ttft_ms is the true time to
+        the first token and itl_mean_ms is measured per request.
+        STREAMING=0 reproduces the older non-streaming runs, where ttft_ms
+        is close to total_ms.
+    IGNORE_EOS=1 (default): the server generates exactly max_tokens, so the
+        output length is the one requested.
+    LOAD_MODE=batch (default): synchronized batches of CONCURRENCY requests,
+        as in earlier runs. LOAD_MODE=steady keeps CONCURRENCY requests in
+        flight (each finished request is replaced at once); analysis then
+        drops each cell's first and last CONCURRENCY requests.
+    The request count is raised so the labelled concurrency is reached:
+    whole batches in batch mode, at least 3x CONCURRENCY in steady mode.
 
 Configs:
     BASELINE:  all requests to prefill vLLM (non-disaggregated)
     DISAGG-1D: all requests through decode sidecar (1 decode target)
     DISAGG-2D: round-robin across decode sidecar (2 decode targets)
+    EPP:       through the EPP Gateway (when EPP_URL is set)
+
+Note: BASELINE is one vLLM instance; the DISAGG configs use 2-3. Compare
+per-request latency here, not throughput per GPU.
 
 Usage: python3 toolkit/exp12_tput_outlen.py
 
 Env vars:
     OUTPUT_LENGTHS   Comma-separated output token targets (default: 20,50,100,200)
-    PROMPT_TOKENS    Prompt length in tokens (default: 500)
-    CONCURRENCY      Concurrent requests per batch (default: 8)
-    TOTAL_REQUESTS   Requests per config per output length (default: 24)
+    PROMPT_TOKENS    Prompt length(s) in tokens, comma-separated (default: 500)
+    CONCURRENCY      Concurrency level(s), comma-separated (default: 8)
+    TOTAL_REQUESTS   Requests per cell, before the minimum above (default: 24)
+    STREAMING        1 = streaming requests (default), 0 = non-streaming
+    IGNORE_EOS       1 = generate exactly max_tokens (default), 0 = allow early stop
+    LOAD_MODE        batch (default) or steady
+    STREAM_TIMEOUT   Socket timeout per read, seconds (default: 120)
     CONFIGS          Comma-separated configs to run (default: all)
-                     Options: BASELINE, DISAGG-1D, DISAGG-2D
+                     Options: BASELINE, DISAGG-1D, DISAGG-2D, EPP
 """
 
 import os
 import random
-import statistics
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(__file__))
 from client import (
-    BASELINE_URL,
     DATA_DIR,
-    DISAGG_D1_URL,
-    DISAGG_D2_URL,
-    EPP_URL,
-    PREFILL_HOST,
+    RUN_NONCE,
     WARMUP,
     build_prompt,
     dot,
     env,
     epp_enabled,
+    load_mode_from_env,
     print_config,
     progress,
+    route_throughput,
+    run_load,
     send_request,
+    send_streaming,
     write_run_info,
 )
-from schemas import ConfigThroughput, Exp11Row, TypedCSVWriter
+from schemas import ConfigThroughput, Exp12Row, TypedCSVWriter
 
 OUTPUT_LENGTHS = [int(x) for x in env("OUTPUT_LENGTHS", "20,50,100,200").split(",")]
-PROMPT_TOKENS = int(env("PROMPT_TOKENS", "500"))
-CONCURRENCY = int(env("CONCURRENCY", "8"))
+PROMPT_LENGTHS = [int(x) for x in env("PROMPT_TOKENS", "500").split(",")]
+CONCURRENCY_LEVELS = [int(x) for x in env("CONCURRENCY", "8").split(",")]
 TOTAL_REQUESTS = int(env("TOTAL_REQUESTS", "24"))
+STREAMING = env("STREAMING", "1") == "1"
+IGNORE_EOS = env("IGNORE_EOS", "1") == "1"
+LOAD_MODE = load_mode_from_env("batch")
+STREAM_TIMEOUT = int(env("STREAM_TIMEOUT", "120"))
 
 _CONFIG_MAP = {
     "BASELINE": ConfigThroughput.BASELINE,
@@ -71,122 +97,113 @@ CONFIGS = ([_CONFIG_MAP[x.strip()] for x in env("CONFIGS", "").split(",") if x.s
 if ConfigThroughput.DISAGG_EPP in CONFIGS and not epp_enabled():
     raise SystemExit("CONFIGS includes EPP but EPP_URL is not configured")
 
-DISAGG_HEADERS = {"x-prefiller-host-port": PREFILL_HOST}
+
+def mean_itl_ms(r):
+    """Mean inter-token latency of one streamed request, or 0 if undefined.
+
+    Uses the server's token count when reported, since streamed chunks can
+    undercount tokens that decode to empty text.
+    """
+    if not r.token_times:
+        return 0.0
+    tokens = r.usage_completion_tokens or r.completion_tokens
+    if tokens > 1 and r.ttft_ms > 0 and r.total_ms > r.ttft_ms:
+        return (r.total_ms - r.ttft_ms) / (tokens - 1)
+    return 0.0
 
 
-def send_one(url, headers, prompt, max_tokens, tag):
-    r = send_request(url, prompt, max_tokens, extra_headers=headers)
-    return r, tag
+def send(url, headers, prompt, max_tokens):
+    if STREAMING:
+        return send_streaming(url, prompt, max_tokens, extra_headers=headers,
+                              timeout=STREAM_TIMEOUT, ignore_eos=IGNORE_EOS,
+                              include_usage=True)
+    return send_request(url, prompt, max_tokens, extra_headers=headers,
+                        ignore_eos=IGNORE_EOS)
 
 
 def main():
     outfile = os.path.join(DATA_DIR, "exp12-results.csv")
     write_run_info("exp12", {
         "output_lengths": OUTPUT_LENGTHS,
-        "prompt_tokens": PROMPT_TOKENS,
-        "concurrency": CONCURRENCY,
+        "prompt_tokens": PROMPT_LENGTHS,
+        "concurrency": CONCURRENCY_LEVELS,
         "total_requests": TOTAL_REQUESTS,
+        "streaming": STREAMING,
+        "ignore_eos": IGNORE_EOS,
+        "load_mode": LOAD_MODE,
+        "stream_timeout": STREAM_TIMEOUT,
     })
-    writer = TypedCSVWriter(outfile, Exp11Row)
+    writer = TypedCSVWriter(outfile, Exp12Row)
 
     progress("=== Experiment 12: Throughput vs Output Length ===")
     print_config()
     progress(f"  Output lengths: {OUTPUT_LENGTHS}")
-    progress(f"  Prompt tokens: {PROMPT_TOKENS}")
-    progress(f"  Concurrency: {CONCURRENCY}")
-    progress(f"  Requests per config: {TOTAL_REQUESTS}")
+    progress(f"  Prompt tokens:  {PROMPT_LENGTHS}")
+    progress(f"  Concurrency:    {CONCURRENCY_LEVELS}")
+    progress(f"  Requests/cell:  {TOTAL_REQUESTS} (raised to reach each concurrency)")
+    progress(f"  Streaming: {STREAMING}  ignore_eos: {IGNORE_EOS}  load mode: {LOAD_MODE}")
     progress(f"  Output: {outfile}")
     progress("")
 
-    for max_tokens in OUTPUT_LENGTHS:
-        progress(f"--- Max tokens: {max_tokens} ---")
+    for concurrency in CONCURRENCY_LEVELS:
+        for ptokens in PROMPT_LENGTHS:
+            for max_tokens in OUTPUT_LENGTHS:
+                progress(f"--- concurrency={concurrency} prompt={ptokens} "
+                         f"max_tokens={max_tokens} ---")
+                warmup_prompt = build_prompt(ptokens)
+                config_order = list(CONFIGS)
+                random.shuffle(config_order)
 
-        warmup_prompt = build_prompt(PROMPT_TOKENS)
+                for config_name in config_order:
+                    progress(f"  {config_name.value}: ", end="")
+                    for seq in range(1, max(WARMUP, 2) + 1):  # reach both decode targets
+                        url, hdrs, _ = route_throughput(config_name, seq)
+                        send(url, hdrs, warmup_prompt, min(max_tokens, 20))
 
-        config_order = list(CONFIGS)
-        random.shuffle(config_order)
-
-        for config_name in config_order:
-            progress(f"  {config_name}: ", end="")
-
-            for i in range(WARMUP):
-                if config_name == ConfigThroughput.BASELINE:
-                    send_request(BASELINE_URL, warmup_prompt, max_tokens)
-                elif config_name == ConfigThroughput.DISAGG_EPP:
-                    send_request(EPP_URL, warmup_prompt, max_tokens)
-                elif config_name == ConfigThroughput.DISAGG_2D and i % 2 == 1:
-                    send_request(DISAGG_D2_URL, warmup_prompt, max_tokens,
-                                 extra_headers=DISAGG_HEADERS)
-                else:
-                    send_request(DISAGG_D1_URL, warmup_prompt, max_tokens,
-                                 extra_headers=DISAGG_HEADERS)
-
-            wall_start = time.monotonic()
-            run = 0
-            completion_counts = []
-
-            while run < TOTAL_REQUESTS:
-                batch_size = min(CONCURRENCY, TOTAL_REQUESTS - run)
-                futures = []
-
-                with ThreadPoolExecutor(max_workers=batch_size) as pool:
-                    for _i in range(batch_size):
-                        run += 1
-                        run_num = run
-                        prompt = build_prompt(PROMPT_TOKENS,
-                                              cache_bust=(max_tokens, str(config_name), run_num))
-
-                        if config_name == ConfigThroughput.BASELINE:
-                            f = pool.submit(send_one, BASELINE_URL, None,
-                                            prompt, max_tokens, "d1")
-                        elif config_name == ConfigThroughput.DISAGG_1D:
-                            f = pool.submit(send_one, DISAGG_D1_URL,
-                                            DISAGG_HEADERS, prompt, max_tokens, "d1")
-                        elif config_name == ConfigThroughput.DISAGG_EPP:
-                            f = pool.submit(send_one, EPP_URL, None,
-                                            prompt, max_tokens, "epp")
-                        else:
-                            if run % 2 == 1:
-                                f = pool.submit(send_one, DISAGG_D1_URL,
-                                                DISAGG_HEADERS, prompt, max_tokens, "d1")
-                            else:
-                                f = pool.submit(send_one, DISAGG_D2_URL,
-                                                DISAGG_HEADERS, prompt, max_tokens, "d2")
-                        futures.append((f, run_num))
-
-                    for future, run_num in futures:
-                        r, tag = future.result()
+                    def one(seq, inflight, config_name=config_name, ptokens=ptokens,
+                            max_tokens=max_tokens, concurrency=concurrency):
+                        prompt = build_prompt(
+                            ptokens,
+                            cache_bust=("exp12", RUN_NONCE, ptokens, max_tokens,
+                                        config_name.value, concurrency, seq))
+                        url, hdrs, tag = route_throughput(config_name, seq)
+                        r = send(url, hdrs, prompt, max_tokens)
                         writer.write({
                             "experiment": "exp12",
                             "config": config_name,
-                            "prompt_tokens_target": PROMPT_TOKENS,
+                            "prompt_tokens_target": ptokens,
                             "max_tokens": max_tokens,
-                            "concurrency": CONCURRENCY,
-                            "run": run_num,
+                            "concurrency": concurrency,
+                            "run": seq,
                             "ttft_ms": r.ttft_ms,
                             "total_ms": r.total_ms,
                             "status_code": r.status,
                             "prompt_tokens_actual": r.prompt_tokens,
                             "completion_tokens": r.completion_tokens,
                             "target": tag,
+                            "streaming": int(STREAMING),
+                            "load_mode": LOAD_MODE,
+                            "inflight_at_start": inflight,
+                            "itl_mean_ms": round(mean_itl_ms(r), 2),
+                            "server_completion_tokens": r.usage_completion_tokens,
                             "error": r.error,
                         })
-                        if r.status == 200 and r.completion_tokens:
-                            completion_counts.append(int(r.completion_tokens))
+                        dot()
+                        return r
 
-                dot()
+                    wall_start = time.monotonic()
+                    results, total = run_load(LOAD_MODE, concurrency, TOTAL_REQUESTS, one)
+                    wall_s = time.monotonic() - wall_start
+                    errors = sum(1 for r in results if r.status != 200)
+                    progress(f" {wall_s:.1f}s | {total} requests | {total / wall_s:.1f} req/s"
+                             + (f" | errors: {errors}/{total}" if errors else ""))
 
-            wall_s = time.monotonic() - wall_start
-            throughput = TOTAL_REQUESTS / wall_s
-            progress(f" {wall_s:.1f}s | {throughput:.1f} req/s")
-
-            if completion_counts:
-                median_tokens = statistics.median(completion_counts)
-                if median_tokens < 0.8 * max_tokens:
-                    progress(f"    WARNING: median completion_tokens={median_tokens:.0f} "
-                             f"< 80% of target {max_tokens} (model may be hitting EOS early)")
-
-        progress("")
+                    tokens = sorted((r.usage_completion_tokens or r.completion_tokens)
+                                    for r in results if r.status == 200)
+                    if tokens and tokens[len(tokens) // 2] < 0.8 * max_tokens:
+                        progress(f"    WARNING: median completion tokens {tokens[len(tokens) // 2]} "
+                                 f"< 80% of target {max_tokens} (set IGNORE_EOS=1)")
+            progress("")
 
     writer.close()
     progress(f"=== Experiment 12 Complete === ({outfile})")
