@@ -53,6 +53,7 @@ Gateway, and metrics requirements.
 | `throughput` | Scaling under concurrent load |
 | `isolation` | Whether prefill/decode separation protects light requests from heavy prefills |
 | `seqlen` | Transfer cost vs prompt length |
+| `bandwidth CONFIG` | Exact-token prefill cost, TP rank transfer timing, and payload bandwidth ([guide](docs/bandwidth.md)) |
 | `saturation` | QPS at which each topology collapses |
 | `mixed` | Realistic mixed-length workload comparison |
 | `fault` | Pod failure and recovery time (destructive) |

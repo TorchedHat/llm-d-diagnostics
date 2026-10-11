@@ -45,14 +45,17 @@ def http(endpoint, payload=None, headers=None, timeout=300):
     if token:
         extra.setdefault("Authorization", f"Bearer {token}")
     request = urllib.request.Request(
-        endpoint, data=json.dumps(payload).encode() if payload is not None else None,
+        endpoint,
+        data=json.dumps(payload).encode() if payload is not None else None,
         headers=extra,
     )
     return urllib.request.urlopen(request, timeout=timeout)
 
 
 def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def write_json(path, value):
@@ -72,20 +75,28 @@ def load_config(path):
     config.setdefault("timeout", 300)
     positive(config["timeout"], "timeout")
     config.setdefault("warmup", 3)
-    if isinstance(config["warmup"], bool) or not isinstance(config["warmup"], int) or config["warmup"] < 1:
+    if (
+        isinstance(config["warmup"], bool)
+        or not isinstance(config["warmup"], int)
+        or config["warmup"] < 1
+    ):
         raise ValueError("warmup must be at least 1")
     for target in _targets(config):
         headers = target.get("headers", {})
         if not isinstance(headers, dict) or any(not isinstance(v, str) for v in headers.values()):
             raise ValueError("headers must map names to strings")
         if any(k.lower() in {"authorization", "cookie", "proxy-authorization"} for k in headers):
-            raise ValueError("use EXPERIMENT_API_KEY; credentials must not be saved in configurations")
+            raise ValueError(
+                "use EXPERIMENT_API_KEY; credentials must not be saved in configurations"
+            )
     return config
 
 
 def _targets(config):
     if "arms" in config:
-        if not isinstance(config["arms"], list) or any(not isinstance(a, dict) for a in config["arms"]):
+        if not isinstance(config["arms"], list) or any(
+            not isinstance(a, dict) for a in config["arms"]
+        ):
             raise ValueError("arms must be a list of objects")
         return [t for arm in config["arms"] for t in arm.get("targets", [])]
     return [config[k] for k in ("prefill", "decode") if k in config]
@@ -99,37 +110,57 @@ def initialize(directory, config, script):
     commit = os.environ.get("TOOLKIT_COMMIT", "unknown")
     if commit == "unknown":
         try:
-            result = subprocess.run(["git", "-C", str(here), "rev-parse", "HEAD"],
-                                    capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                ["git", "-C", str(here), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
             if result.returncode == 0:
                 commit = result.stdout.strip()
-                dirty = subprocess.run(["git", "-C", str(here), "status", "--porcelain",
-                                        "--untracked-files=no"], capture_output=True, text=True, check=False)
+                dirty = subprocess.run(
+                    ["git", "-C", str(here), "status", "--porcelain", "--untracked-files=no"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
                 if dirty.stdout.strip():
                     commit += "-dirty"
         except OSError:
             pass
-    write_json(directory / "run-info.json", {
-        "toolkit_commit": commit, "config_sha256": digest(config),
-        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in (here / pathlib.Path(script).name, pathlib.Path(__file__))},
-    })
+    write_json(
+        directory / "run-info.json",
+        {
+            "toolkit_commit": commit,
+            "config_sha256": digest(config),
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "source_sha256": {
+                p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in (here / pathlib.Path(script).name, pathlib.Path(__file__))
+            },
+        },
+    )
     return directory
 
 
 def manifest(directory):
     directory = pathlib.Path(directory)
-    records = {str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest()
-               for p in sorted(directory.rglob("*")) if p.is_file() and p != directory / "manifest.json"}
+    records = {
+        str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(directory.rglob("*"))
+        if p.is_file() and p != directory / "manifest.json"
+    }
     write_json(directory / "manifest.json", records)
 
 
 def verify_manifest(directory):
     directory = pathlib.Path(directory)
     records = json.loads((directory / "manifest.json").read_text())
-    actual = {str(p.relative_to(directory)) for p in directory.rglob("*")
-              if p.is_file() and p != directory / "manifest.json"}
+    actual = {
+        str(p.relative_to(directory))
+        for p in directory.rglob("*")
+        if p.is_file() and p != directory / "manifest.json"
+    }
     if set(records) != actual:
         raise ValueError("manifest file list differs from the artifact directory")
     for name, expected in records.items():
@@ -144,19 +175,32 @@ def prepare(config, tokens, key):
     seed = digest((config["nonce"], config["model"], tokens, key))
     rng = random.Random(int(seed, 16))
     text = seed + " " + " ".join(rng.choice(WORDS) for _ in range(tokens * 2))
-    with http(config["tokenize_url"], {"model": config["model"], "prompt": text},
-              timeout=config["timeout"]) as response:
+    with http(
+        config["tokenize_url"],
+        {"model": config["model"], "prompt": text},
+        timeout=config["timeout"],
+    ) as response:
         ids = json.load(response)["tokens"][:tokens]
-    if len(ids) != tokens or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in ids):
+    if len(ids) != tokens or any(
+        isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in ids
+    ):
         raise ValueError("tokenizer did not return the requested number of token IDs")
     return ids
 
 
 def send(config, target, prompt, index, salt, output_tokens, extra=None):
-    payload = {"model": config["model"], "prompt": prompt, "max_tokens": output_tokens,
-               "temperature": 0, "ignore_eos": True, "stream": True,
-               "stream_options": {"include_usage": True}, "return_token_ids": True,
-               "cache_salt": digest((config["nonce"], salt)), **(extra or {})}
+    payload = {
+        "model": config["model"],
+        "prompt": prompt,
+        "max_tokens": output_tokens,
+        "temperature": 0,
+        "ignore_eos": True,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "return_token_ids": True,
+        "cache_salt": digest((config["nonce"], salt)),
+        **(extra or {}),
+    }
     start = time.monotonic_ns()
     started_unix_ns = time.time_ns()
     chunks, ids = [], []
@@ -189,10 +233,13 @@ def send(config, target, prompt, index, salt, output_tokens, extra=None):
                     if not isinstance(part, list) or any(type(i) is not int or i < 0 for i in part):
                         raise RuntimeError("invalid completion token IDs")
                     if choice.get("text") and not part:
-                        raise RuntimeError("token IDs missing; streamed chunks cannot be counted as tokens")
+                        raise RuntimeError(
+                            "token IDs missing; streamed chunks cannot be counted as tokens"
+                        )
                     if part:
-                        chunks.append({"seconds": (time.monotonic_ns() - start) / 1e9,
-                                       "tokens": len(part)})
+                        chunks.append(
+                            {"seconds": (time.monotonic_ns() - start) / 1e9, "tokens": len(part)}
+                        )
                         ids.extend(part)
         if not complete or not usage:
             raise RuntimeError("missing stream completion or usage")
@@ -206,19 +253,34 @@ def send(config, target, prompt, index, salt, output_tokens, extra=None):
         error = str(exc)
     wall_ms = (time.monotonic_ns() - start) / 1e6
     ttft = chunks[0]["seconds"] * 1000 if chunks else None
-    itl = ((chunks[-1]["seconds"] - chunks[0]["seconds"]) * 1000 / (len(ids) - 1)
-           if len(ids) > 1 and chunks and chunks[0]["tokens"] == 1 else None)
+    itl = (
+        (chunks[-1]["seconds"] - chunks[0]["seconds"]) * 1000 / (len(ids) - 1)
+        if len(ids) > 1 and chunks and chunks[0]["tokens"] == 1
+        else None
+    )
     single = len(chunks) == len(ids) and all(c["tokens"] == 1 for c in chunks)
     gaps = [(b["seconds"] - a["seconds"]) * 1000 for a, b in pairwise(chunks)]
-    return {"request": index, "target": target.get("label", "target"),
-            "started_unix_ns": started_unix_ns, "started_monotonic_ns": start,
-            "finished_monotonic_ns": start + int(wall_ms * 1e6),
-            "status": status, "success": status == 200 and not error, "error": error,
-            "usage": usage, "server_request_id": request_id,
-            "prompt_sha256": digest(prompt), "completion_tokens": len(ids),
-            "ttft_ms": ttft, "itl_mean_ms": itl, "total_ms": wall_ms,
-            "itl_p99_ms": percentile(gaps, .99) if single else None,
-            "single_token_chunks": single, "stream_chunks": chunks, "generated_token_ids": ids}
+    return {
+        "request": index,
+        "target": target.get("label", "target"),
+        "started_unix_ns": started_unix_ns,
+        "started_monotonic_ns": start,
+        "finished_monotonic_ns": start + int(wall_ms * 1e6),
+        "status": status,
+        "success": status == 200 and not error,
+        "error": error,
+        "usage": usage,
+        "server_request_id": request_id,
+        "prompt_sha256": digest(prompt),
+        "completion_tokens": len(ids),
+        "ttft_ms": ttft,
+        "itl_mean_ms": itl,
+        "total_ms": wall_ms,
+        "itl_p99_ms": percentile(gaps, 0.99) if single else None,
+        "single_token_chunks": single,
+        "stream_chunks": chunks,
+        "generated_token_ids": ids,
+    }
 
 
 def percentile(values, q):
@@ -236,8 +298,11 @@ def snapshot(endpoints):
     for name, endpoint in endpoints.items():
         with http(endpoint, timeout=10) as response:
             text = response.read().decode()
-        data["pods"][name] = [line for line in text.splitlines()
-                              if line.startswith(("vllm:", "process_start_time_seconds"))]
+        data["pods"][name] = [
+            line
+            for line in text.splitlines()
+            if line.startswith(("vllm:", "process_start_time_seconds"))
+        ]
     return data
 
 
@@ -261,8 +326,10 @@ def delta(before, after, pod, metric, source=None):
     if set(before["pods"]) != set(after["pods"]):
         raise ValueError("metrics endpoints changed")
     for name in before["pods"]:
-        starts = [[line for line in s["pods"][name] if line.startswith("process_start_time_seconds")]
-                  for s in (before, after)]
+        starts = [
+            [line for line in s["pods"][name] if line.startswith("process_start_time_seconds")]
+            for s in (before, after)
+        ]
         if starts[0] != starts[1]:
             raise ValueError(f"process restarted: {name}")
     value = counter(after, pod, metric, source) - counter(before, pod, metric, source)
@@ -274,14 +341,20 @@ def delta(before, after, pod, metric, source=None):
 def closed_loop(concurrency, prompts, targets, fn, directory):
     results, active = [], {}
     cursor = 0
-    with gzip.open(pathlib.Path(directory) / "requests.jsonl.gz", "wt") as file, \
-            concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+    with (
+        gzip.open(pathlib.Path(directory) / "requests.jsonl.gz", "wt") as file,
+        concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool,
+    ):
         started = time.monotonic()
         while cursor < min(concurrency, len(prompts)):
-            active[pool.submit(fn, targets[cursor % len(targets)], prompts[cursor], cursor)] = cursor
+            active[pool.submit(fn, targets[cursor % len(targets)], prompts[cursor], cursor)] = (
+                cursor
+            )
             cursor += 1
         while active:
-            completed, _ = concurrent.futures.wait(active, return_when=concurrent.futures.FIRST_COMPLETED)
+            completed, _ = concurrent.futures.wait(
+                active, return_when=concurrent.futures.FIRST_COMPLETED
+            )
             for future in completed:
                 active.pop(future)
                 row = future.result()
@@ -289,7 +362,9 @@ def closed_loop(concurrency, prompts, targets, fn, directory):
                 file.write(json.dumps(row, allow_nan=False) + "\n")
                 file.flush()
                 if cursor < len(prompts):
-                    active[pool.submit(fn, targets[cursor % len(targets)], prompts[cursor], cursor)] = cursor
+                    active[
+                        pool.submit(fn, targets[cursor % len(targets)], prompts[cursor], cursor)
+                    ] = cursor
                     cursor += 1
         wall_seconds = time.monotonic() - started
     return results, wall_seconds
@@ -298,5 +373,6 @@ def closed_loop(concurrency, prompts, targets, fn, directory):
 def save_prompts(directory, prompts):
     with gzip.open(pathlib.Path(directory) / "prompts.jsonl.gz", "wt") as file:
         for index, prompt in enumerate(prompts):
-            file.write(json.dumps({"request": index, "token_ids": prompt,
-                                   "sha256": digest(prompt)}) + "\n")
+            file.write(
+                json.dumps({"request": index, "token_ids": prompt, "sha256": digest(prompt)}) + "\n"
+            )
