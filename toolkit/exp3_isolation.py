@@ -51,8 +51,6 @@ LIGHT_MAX = int(env("LIGHT_MAX", "20"))
 
 HEAVY_PROMPT_TOKENS = int(env("HEAVY_PROMPT_TOKENS", "1000"))
 LIGHT_PROMPT_TOKENS = int(env("LIGHT_PROMPT_TOKENS", "10"))
-HEAVY_PROMPT = build_prompt(HEAVY_PROMPT_TOKENS)
-LIGHT_PROMPT = build_prompt(LIGHT_PROMPT_TOKENS)
 
 DISAGG_HEADERS = {"x-prefiller-host-port": PREFILL_HOST}
 
@@ -81,30 +79,30 @@ def main():
 
     configs = {
         ConfigIsolation.BASELINE: [
-            (BASELINE_URL, None, HEAVY_PROMPT, HEAVY_MAX, Weight.HEAVY, 0),
-            (BASELINE_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 1),
-            (BASELINE_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 2),
-            (BASELINE_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 3),
-            (BASELINE_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 4),
-            (BASELINE_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 5),
+            (BASELINE_URL, None, HEAVY_PROMPT_TOKENS, HEAVY_MAX, Weight.HEAVY, 0),
+            (BASELINE_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 1),
+            (BASELINE_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 2),
+            (BASELINE_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 3),
+            (BASELINE_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 4),
+            (BASELINE_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 5),
         ],
         ConfigIsolation.DISAGG_2D: [
-            (DISAGG_D1_URL, DISAGG_HEADERS, HEAVY_PROMPT, HEAVY_MAX, Weight.HEAVY, 0),
-            (DISAGG_D1_URL, DISAGG_HEADERS, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 1),
-            (DISAGG_D2_URL, DISAGG_HEADERS, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 2),
-            (DISAGG_D1_URL, DISAGG_HEADERS, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 3),
-            (DISAGG_D2_URL, DISAGG_HEADERS, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 4),
-            (DISAGG_D1_URL, DISAGG_HEADERS, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 5),
+            (DISAGG_D1_URL, DISAGG_HEADERS, HEAVY_PROMPT_TOKENS, HEAVY_MAX, Weight.HEAVY, 0),
+            (DISAGG_D1_URL, DISAGG_HEADERS, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 1),
+            (DISAGG_D2_URL, DISAGG_HEADERS, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 2),
+            (DISAGG_D1_URL, DISAGG_HEADERS, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 3),
+            (DISAGG_D2_URL, DISAGG_HEADERS, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 4),
+            (DISAGG_D1_URL, DISAGG_HEADERS, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 5),
         ],
     }
     if epp_enabled():
         configs[ConfigIsolation.DISAGG_EPP] = [
-            (EPP_URL, None, HEAVY_PROMPT, HEAVY_MAX, Weight.HEAVY, 0),
-            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 1),
-            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 2),
-            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 3),
-            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 4),
-            (EPP_URL, None, LIGHT_PROMPT, LIGHT_MAX, Weight.LIGHT, 5),
+            (EPP_URL, None, HEAVY_PROMPT_TOKENS, HEAVY_MAX, Weight.HEAVY, 0),
+            (EPP_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 1),
+            (EPP_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 2),
+            (EPP_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 3),
+            (EPP_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 4),
+            (EPP_URL, None, LIGHT_PROMPT_TOKENS, LIGHT_MAX, Weight.LIGHT, 5),
         ]
 
     for config_name, request_specs in configs.items():
@@ -112,15 +110,20 @@ def main():
 
         # Warm-up (use a light request spec)
         light_spec = next(s for s in request_specs if s[4] == Weight.LIGHT)
-        for _ in range(WARMUP):
-            send_request(light_spec[0], LIGHT_PROMPT, LIGHT_MAX,
-                         extra_headers=light_spec[1])
+        for i in range(WARMUP):
+            prompt = build_prompt(LIGHT_PROMPT_TOKENS, cache_bust=("exp3-warmup", str(config_name), i))
+            send_request(light_spec[0], prompt, LIGHT_MAX, extra_headers=light_spec[1])
 
         for trial in range(1, TRIALS + 1):
+            # A unique prompt per request, built before launch so the six
+            # requests still depart together.
+            prompts = [build_prompt(ptokens, cache_bust=("exp3", str(config_name), trial, idx))
+                       for _url, _headers, ptokens, _max_tok, _weight, idx in request_specs]
             # Launch all 6 requests simultaneously
             with ThreadPoolExecutor(max_workers=6) as pool:
                 futures = []
-                for url, headers, prompt, max_tok, weight, idx in request_specs:
+                for (url, headers, _ptokens, max_tok, weight, idx), prompt in zip(
+                        request_specs, prompts):
                     f = pool.submit(send_one, url, headers, prompt, max_tok)
                     futures.append((f, weight, idx))
 

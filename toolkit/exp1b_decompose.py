@@ -49,7 +49,7 @@ from schemas import ConfigDecompose, Exp1bRow, TypedCSVWriter
 DECOMPOSE_RUNS = int(env("RUNS", "30"))
 
 DECOMPOSE_PROMPT = int(env("DECOMPOSE_PROMPT", "50"))
-PROMPT = build_prompt(DECOMPOSE_PROMPT)
+WARMUP_PROMPT = build_prompt(DECOMPOSE_PROMPT)
 
 
 
@@ -116,7 +116,7 @@ def main():
         # Warm-up: each config gets WARMUP requests
         for config_name, conn, _desc in CONFIGS:
             progress(f"  Warming up {config_name}...")
-            conn.warmup(PROMPT)
+            conn.warmup(WARMUP_PROMPT, unique=True)
 
         # Interleaved runs: cycle through all configs per run.
         # This makes run N's (A,B,C,D) measurements temporally adjacent,
@@ -124,7 +124,9 @@ def main():
         progress(f"  Running {DECOMPOSE_RUNS} interleaved rounds...")
         for run in range(1, DECOMPOSE_RUNS + 1):
             for config_name, conn, _desc in CONFIGS:
-                r = conn.send(PROMPT, MAX_TOKENS)
+                prompt = build_prompt(
+                    DECOMPOSE_PROMPT, cache_bust=("exp1b", str(config_name), run))
+                r = conn.send(prompt, MAX_TOKENS)
 
                 writer.write({
                     "experiment": "exp1b",

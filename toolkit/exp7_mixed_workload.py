@@ -86,8 +86,6 @@ LONG_MAX = int(env("LONG_MAX", "50"))
 LONG_PCT = int(env("LONG_PCT", "20"))
 GPU_SAMPLE_INTERVAL = float(env("GPU_SAMPLE_INTERVAL", "2"))
 
-SHORT_PROMPT = build_prompt(SHORT_TOKENS)
-LONG_PROMPT = build_prompt(LONG_TOKENS)
 DISAGG_HEADERS = {"x-prefiller-host-port": PREFILL_HOST}
 
 
@@ -211,7 +209,9 @@ def run_config(config_name, writer, gpu_writer):
 
     def do_request(scheduled_time, seq):
         wl = pick_workload(seq, LONG_PCT)
-        prompt = LONG_PROMPT if wl == WorkloadClass.LONG else SHORT_PROMPT
+        # Unique per request and config; built before the departure wait.
+        prompt = build_prompt(LONG_TOKENS if wl == WorkloadClass.LONG else SHORT_TOKENS,
+                              cache_bust=("exp7", str(config_name), seq))
         max_tok = LONG_MAX if wl == WorkloadClass.LONG else SHORT_MAX
         url = pick_url(seq)
 
@@ -259,7 +259,8 @@ def run_config(config_name, writer, gpu_writer):
     # Warm-up
     for i in range(WARMUP):
         url = pick_url(i + 1)
-        send_request(url, SHORT_PROMPT, SHORT_MAX, extra_headers=headers())
+        prompt = build_prompt(SHORT_TOKENS, cache_bust=("exp7-warmup", str(config_name), i))
+        send_request(url, prompt, SHORT_MAX, extra_headers=headers())
 
     # Generate Poisson arrivals — same seed for all configs so both
     # BASELINE and DISAGG see identical arrival patterns. This controls

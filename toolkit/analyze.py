@@ -2391,6 +2391,67 @@ def analyze_exp14(data_dir):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+# Experiments that test the prefix cache on purpose; reuse is expected there.
+CACHE_EXPERIMENTS = {"exp8", "exp10"}
+CACHE_HIT_LIMIT = 0.05        # share of prompt tokens served from prefix cache
+# NIXL moves whole KV blocks (16 tokens by default) while vLLM counts tokens,
+# so short prompts read up to ~25% high; real faults are off by multiples.
+BYTES_PER_TOKEN_TOLERANCE = 0.5
+
+
+def kv_accounting(data_dir):
+    """Lines checking each experiment's KV accounting (kv-sources/*.json).
+
+    Flags prefix-cache reuse outside the cache experiments (later requests
+    skipped prefill and transfer, so latency and transfer numbers understate
+    the real cost) and NIXL bytes per transferred token that differ between
+    experiments (the KV size per token is a model constant).
+    """
+    import glob
+    import json
+    paths = sorted(p for p in glob.glob(os.path.join(data_dir, "kv-sources", "*.json"))
+                   if not p.endswith((".before.json", ".after.json")))
+    if not paths:
+        return []
+    rows = []
+    for path in paths:
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        rows.append((os.path.basename(path)[:-len(".json")], d.get("roles", {})))
+    per_token = sorted(r["decode"]["nixl_bytes_per_external_token"] for _, r in rows
+                       if r.get("decode", {}).get("nixl_bytes_per_external_token"))
+    reference = per_token[len(per_token) // 2] if per_token else None
+
+    lines = ["KV accounting (prompt-token sources on every vLLM pod, per experiment):",
+             "  exp     prefill cache-hit  decode cache-hit  via NIXL   KiB/token"]
+    warnings = []
+    for exp, roles in rows:
+        pf, dc = roles.get("prefill", {}), roles.get("decode", {})
+        def pct(r):
+            f = r.get("cache_hit_fraction")
+            return "      -" if f is None else f"{100 * f:6.1f}%"
+        bpt = dc.get("nixl_bytes_per_external_token")
+        lines.append(f"  {exp:7s} {pct(pf):>17s} {pct(dc):>17s} "
+                     f"{dc.get('external_kv_transfer', 0):9.0f}   "
+                     f"{'-' if not bpt else f'{bpt / 1024:.0f}':>9s}")
+        if exp not in CACHE_EXPERIMENTS:
+            for role, r in (("prefill", pf), ("decode", dc)):
+                f = r.get("cache_hit_fraction")
+                if f is not None and f > CACHE_HIT_LIMIT:
+                    warnings.append(
+                        f"  WARNING {exp}: {100 * f:.0f}% of {role} prompt tokens were prefix-cache "
+                        f"hits; requests reused earlier KV, so prefill and transfer costs are "
+                        f"understated")
+        if bpt and reference and abs(bpt - reference) / reference > BYTES_PER_TOKEN_TOLERANCE:
+            warnings.append(
+                f"  WARNING {exp}: {bpt / 1024:.0f} KiB per NIXL token vs {reference / 1024:.0f} "
+                f"KiB in the other experiments; KV size per token is a model constant")
+    return lines + warnings
+
+
 def main():
     data_dir = sys.argv[1] if len(sys.argv) > 1 else "data"
 
@@ -2418,6 +2479,11 @@ def main():
     print("llm-d Diagnostics — Analysis")
     print(f"Data directory: {data_dir}")
     print()
+    accounting = kv_accounting(data_dir)
+    for line in accounting:
+        print(line)
+    if accounting:
+        print()
 
     for title, filename, analyzer in experiments:
         filepath = os.path.join(data_dir, filename)
