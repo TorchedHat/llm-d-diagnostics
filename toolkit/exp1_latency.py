@@ -111,13 +111,13 @@ def main():
     # ── Run experiment (interleaved) ────────────────────────────────────────
     try:
         for ptokens in PROMPT_LENGTHS:
-            prompt = build_prompt(ptokens)
+            warmup_prompt = build_prompt(ptokens)
             progress(f"--- Prompt target: {ptokens} tokens ---")
 
             # Warmup all configs for this prompt length
             progress("  Warmup: ", end="")
             for _config_name, conn in conns:
-                conn.warmup(prompt, MAX_TOKENS)
+                conn.warmup(warmup_prompt, MAX_TOKENS, unique=True)
                 dot()
             progress(" done")
 
@@ -125,6 +125,8 @@ def main():
             progress("  Runs:   ", end="")
             for run in range(1, RUNS + 1):
                 for config_name, conn in conns:
+                    prompt = build_prompt(
+                        ptokens, cache_bust=("exp1", ptokens, str(config_name), run))
                     r = conn.send(prompt, MAX_TOKENS)
 
                     writer.write({

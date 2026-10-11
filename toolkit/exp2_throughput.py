@@ -48,15 +48,15 @@ MAX_TOKENS = int(env("MAX_TOKENS", "30"))
 CONCURRENCY_LEVELS = [int(x) for x in env("CONCURRENCY_LEVELS", "1,2,4,8,16").split(",")]
 
 PROMPT_TOKENS = int(env("PROMPT_TOKENS", "50"))
-PROMPT = build_prompt(PROMPT_TOKENS)
 
 DISAGG_HEADERS = {"x-prefiller-host-port": PREFILL_HOST}
 
 
 
-def send_one(url, headers, tag):
-    """Worker function for thread pool."""
-    r = send_request(url, PROMPT, MAX_TOKENS, extra_headers=headers)
+def send_one(url, headers, tag, key):
+    """Worker function for thread pool; *key* makes the prompt unique."""
+    prompt = build_prompt(PROMPT_TOKENS, cache_bust=key)
+    r = send_request(url, prompt, MAX_TOKENS, extra_headers=headers)
     return r, tag
 
 
@@ -86,15 +86,17 @@ def main():
 
             # Warm-up (sequential, exercise all endpoints)
             for i in range(WARMUP):
+                prompt = build_prompt(PROMPT_TOKENS,
+                                      cache_bust=("exp2-warmup", concurrency, str(config_name), i))
                 if config_name == ConfigThroughput.BASELINE:
-                    send_request(BASELINE_URL, PROMPT, MAX_TOKENS)
+                    send_request(BASELINE_URL, prompt, MAX_TOKENS)
                 elif config_name == ConfigThroughput.DISAGG_2D and i % 2 == 1:
-                    send_request(DISAGG_D2_URL, PROMPT, MAX_TOKENS,
+                    send_request(DISAGG_D2_URL, prompt, MAX_TOKENS,
                                  extra_headers=DISAGG_HEADERS)
                 elif config_name == ConfigThroughput.DISAGG_EPP:
-                    send_request(EPP_URL, PROMPT, MAX_TOKENS)
+                    send_request(EPP_URL, prompt, MAX_TOKENS)
                 else:
-                    send_request(DISAGG_D1_URL, PROMPT, MAX_TOKENS,
+                    send_request(DISAGG_D1_URL, prompt, MAX_TOKENS,
                                  extra_headers=DISAGG_HEADERS)
 
             # Measured runs in batches of `concurrency`
@@ -109,20 +111,21 @@ def main():
                     for _i in range(batch_size):
                         run += 1
                         run_num = run  # capture current value for this future
+                        key = ("exp2", concurrency, str(config_name), run_num)
                         if config_name == ConfigThroughput.BASELINE:
-                            f = pool.submit(send_one, BASELINE_URL, None, "d1")
+                            f = pool.submit(send_one, BASELINE_URL, None, "d1", key)
                         elif config_name == ConfigThroughput.DISAGG_1D:
                             f = pool.submit(send_one, DISAGG_D1_URL,
-                                            DISAGG_HEADERS, "d1")
+                                            DISAGG_HEADERS, "d1", key)
                         elif config_name == ConfigThroughput.DISAGG_EPP:
-                            f = pool.submit(send_one, EPP_URL, None, "epp")
+                            f = pool.submit(send_one, EPP_URL, None, "epp", key)
                         else:  # DISAGG-2D: round-robin
                             if run % 2 == 1:
                                 f = pool.submit(send_one, DISAGG_D1_URL,
-                                                DISAGG_HEADERS, "d1")
+                                                DISAGG_HEADERS, "d1", key)
                             else:
                                 f = pool.submit(send_one, DISAGG_D2_URL,
-                                                DISAGG_HEADERS, "d2")
+                                                DISAGG_HEADERS, "d2", key)
                         futures.append((f, run_num))
 
                     for future, run_num in futures:

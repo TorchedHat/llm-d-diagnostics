@@ -214,8 +214,16 @@ clusters/my-cluster/data/
 ├── exp5-results.csv
 ├── exp6-results.csv
 ├── exp7-results.csv
-└── exp7-gpu.csv
+├── exp7-gpu.csv
+└── kv-sources/                # KV accounting per experiment (see below)
+    ├── exp1b.json             # Per-role deltas: prompt-token sources, NIXL bytes
+    ├── exp1b.before.json      # Raw per-pod snapshots
+    └── exp1b.after.json
 ```
+
+In the test-client pod, results accumulate under
+`/scripts/toolkit/data/<cluster-name>/`, one directory per cluster config,
+because the pod outlives redeployments.
 
 ### CSV schema (performance experiments)
 
@@ -285,6 +293,27 @@ Exp4 operates in two clock domains: local machine (kill timing) and pod
 midpoint estimator. All cross-domain comparisons (detection gaps, load
 result partitioning) apply or document the clock correction.
 
+### Cache-busted prompts and KV accounting
+
+vLLM's prefix cache serves a repeated prompt without prefill, and a
+disaggregated request whose prompt the decode pod already holds transfers
+almost no KV. Every measured request therefore gets its own seeded prompt
+(`build_prompt(..., cache_bust=key)`, the key unique per experiment, config
+and request), and warm-ups miss the cache too. The seed includes
+`PROMPT_NONCE`, so runs against the same long-lived pods do not reuse each
+other's prompts. exp8 and exp10 test the prefix cache and repeat prompts on
+purpose.
+
+`run.sh` checks this on every vLLM pod around each experiment: it snapshots
+`vllm:prompt_tokens_by_source_total` (computed locally, prefix-cache hit, or
+received over NIXL) and NIXL payload bytes (`kv_sources.py`). The analysis
+starts with a table per experiment and warns when more than 5% of prompt
+tokens were prefix-cache hits outside exp8/exp10, or when NIXL bytes per
+transferred token differ between experiments (the KV size per token is a
+model constant; short prompts read up to ~25% high because whole 16-token
+blocks move). The deltas assume the toolkit is the only client during the
+experiment.
+
 ### Statistical rigor
 
 - Bessel-corrected sample variance (N-1 denominator)
@@ -303,6 +332,7 @@ toolkit/
 ├── analyze.py             # Statistical analysis of CSV results
 ├── fault_driver.py        # In-pod probe + load generator (for exp4)
 ├── metrics_collector.py   # In-pod Prometheus scraper
+├── kv_sources.py          # KV accounting around each experiment (runs locally)
 ├── exp1_latency.py        # Experiment 1: latency sweep
 ├── exp1b_decompose.py     # Experiment 1b: latency decomposition
 ├── exp2_throughput.py      # Experiment 2: throughput under load

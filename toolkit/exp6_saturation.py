@@ -58,7 +58,6 @@ DURATION_S = int(env("DURATION_S", "30"))
 PROMPT_TOKENS = int(env("PROMPT_TOKENS", "50"))
 SLO_MULT = float(env("SLO_MULT", "2.0"))
 
-PROMPT = build_prompt(PROMPT_TOKENS)
 DISAGG_HEADERS = {"x-prefiller-host-port": PREFILL_HOST}
 
 CONFIGS = [
@@ -108,6 +107,9 @@ def rate_controlled_run(config_name, qps, duration_s, writer):
     results_lock = threading.Lock()
 
     def do_request(scheduled_time, seq):
+        # Build the unique prompt before the departure time, so its cost does
+        # not count as departure delay.
+        prompt = build_prompt(PROMPT_TOKENS, cache_bust=("exp6", qps, str(config_name), seq))
         # Wait until our scheduled departure time
         now = time.monotonic()
         if scheduled_time > now:
@@ -115,7 +117,7 @@ def rate_controlled_run(config_name, qps, duration_s, writer):
 
         actual_depart = time.monotonic()
         url = pick_url(config_name, seq)
-        r = send_request(url, PROMPT, MAX_TOKENS, extra_headers=headers)
+        r = send_request(url, prompt, MAX_TOKENS, extra_headers=headers)
 
         depart_delay = round((actual_depart - scheduled_time) * 1000, 2)
 
@@ -179,7 +181,8 @@ def main():
     for config_name, _desc in CONFIGS:
         for i in range(WARMUP):
             url = pick_url(config_name, i + 1)
-            send_request(url, PROMPT, MAX_TOKENS, extra_headers=pick_headers(config_name))
+            prompt = build_prompt(PROMPT_TOKENS, cache_bust=("exp6-warmup", str(config_name), i))
+            send_request(url, prompt, MAX_TOKENS, extra_headers=pick_headers(config_name))
 
     for i, qps in enumerate(QPS_LEVELS):
         progress(f"--- QPS: {qps} ---")

@@ -285,6 +285,11 @@ DATA_DIR = env("DATA_DIR", "data")
 WARMUP = int(env("WARMUP", "3"))
 RUNS = int(env("RUNS", "20"))
 MAX_TOKENS = int(env("MAX_TOKENS", "20"))
+# Folded into every cache-busted prompt seed. vLLM pods outlive toolkit runs,
+# so deterministic seeds alone would hit prefix cache left by an earlier run.
+# run.sh sets one per invocation; each experiment records the value it used
+# in run-info.json, and setting it reproduces that experiment's prompts.
+PROMPT_NONCE = env("PROMPT_NONCE", "") or os.urandom(8).hex()
 
 
 # ── Prompt builder ───────────────────────────────────────────────────────────
@@ -306,14 +311,17 @@ def build_prompt(target_tokens, cache_bust=None):
     Each repetition of BASE_SENTENCE is ~10 tokens.  When *cache_bust* is
     set (any hashable value — typically a run counter), the entire prompt
     body is generated from a seeded RNG so every token block is unique,
-    defeating vLLM's hash-based prefix cache.
+    defeating vLLM's hash-based prefix cache. The seed also includes
+    PROMPT_NONCE, so prompts differ between toolkit runs against the same
+    pods. A key must be unique per request: reusing one across configs lets
+    the later config hit the cache the earlier one filled.
     """
     reps = max(1, target_tokens // 10)
     if cache_bust is None:
         return " ".join([BASE_SENTENCE] * reps)
     import hashlib
     import random
-    seed = int(hashlib.sha256(str(cache_bust).encode()).hexdigest()[:16], 16)
+    seed = int(hashlib.sha256(str((PROMPT_NONCE, cache_bust)).encode()).hexdigest()[:16], 16)
     rng = random.Random(seed)
     words = [rng.choice(_WORD_POOL) for _ in range(target_tokens)]
     return " ".join(words)
@@ -771,10 +779,17 @@ class PinnedConnection:
                     error=str(e),
                 )
 
-    def warmup(self, prompt, max_tokens=MAX_TOKENS, n=None, extra_headers=None):
-        """Send warmup requests. First request triggers TLS handshake."""
+    def warmup(self, prompt, max_tokens=MAX_TOKENS, n=None, extra_headers=None,
+               unique=False):
+        """Send warmup requests. First request triggers TLS handshake.
+
+        With *unique*, each request gets a random leading tag, so it misses
+        the prefix cache and warms the full prefill (and KV transfer) path;
+        repeating one prompt only warms the cache-hit path.
+        """
         for _ in range(n if n is not None else WARMUP):
-            self.send(prompt, max_tokens, extra_headers=extra_headers)
+            text = f"[warmup {os.urandom(4).hex()}] {prompt}" if unique else prompt
+            self.send(text, max_tokens, extra_headers=extra_headers)
 
     def close(self):
         """Close the underlying connection."""
@@ -871,6 +886,7 @@ def write_run_info(experiment, extra=None):
     # Per-experiment entry
     entry = {
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "prompt_nonce": PROMPT_NONCE,
     }
     if extra:
         entry.update(extra)

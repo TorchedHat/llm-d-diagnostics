@@ -152,7 +152,7 @@ def main():
 
             # Warm-up all active configs at this prompt length
             for _config_name, conn, _desc in active_configs:
-                conn.warmup(warmup_prompt, MAX_TOKENS)
+                conn.warmup(warmup_prompt, MAX_TOKENS, unique=True)
 
             # Interleaved runs: cycle through all active configs per run.
             # This ensures paired differences (C-B, D-C) cancel time-varying
@@ -162,8 +162,12 @@ def main():
             statuses_by_config = {n: [] for n, _, _ in active_configs}
 
             for run in range(1, SWEEP_RUNS + 1):
-                prompt = build_prompt(ptokens, cache_bust=(ptokens, run))
                 for config_name, conn, _desc in active_configs:
+                    # Unique per config too: a prompt shared across the
+                    # interleaved configs is cached by the first and hits for
+                    # the rest, so later configs skip prefill and transfer.
+                    prompt = build_prompt(
+                        ptokens, cache_bust=("exp5", ptokens, str(config_name), run))
                     r = conn.send(prompt, MAX_TOKENS)
 
                     writer.write({

@@ -24,6 +24,7 @@ to a specific cluster.
 | `RUNS` | `20` | Measured runs per config |
 | `WARMUP` | `3` | Warmup requests (discarded) |
 | `MAX_TOKENS` | `20` | Max completion tokens |
+| `PROMPT_NONCE` | random per `run.sh` invocation | Seed component for cache-busted prompts; recorded per experiment in `run-info.json`, set it to reproduce that experiment's prompts |
 | `DATA_DIR` | `data` | Where CSV results get written |
 
 ## Per-experiment overrides
