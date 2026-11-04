@@ -1,0 +1,11 @@
+{
+  "objective": "ttft_p50",
+  "ttft_slo_ms": 2000,
+  "tpot_slo_ms": 50,
+  "min_observed_attainment": 1.0,
+  "practical_margin": 0.1,
+  "min_blocks": 3,
+  "min_requests_per_block": 8,
+  "max_reserved_gpus": 4,
+  "require_quality": false
+}
