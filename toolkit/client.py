@@ -128,6 +128,10 @@ def witnessed_transport():
     try:
         with open(path) as f:
             witness = json.load(f)
+        if witness.get("classifier_version") != 2:
+            return {"transport": "unknown", "scope": witness.get("scope"),
+                    "witnessed_at": witness.get("witnessed_at"),
+                    "legacy_claim": witness.get("transport")}
         return {key: witness.get(key) for key in ("transport", "scope", "witnessed_at")}
     except (OSError, ValueError):
         return {"transport": "not witnessed",

@@ -65,18 +65,14 @@ Gateway, and metrics requirements.
 
 `characterize` starts with a transport witness, and
 `./toolkit/run.sh <cluster> transport` runs it alone. For each
-prefill-to-decode pair it sends a few cache-busted requests and compares the
-NIXL payload bytes the decode pod received with the bytes on its network
-interfaces: KV that crossed the pod network appears there (ratio about 1, TCP);
-KV moved by RDMA or CUDA IPC does not (ratio about 0). It also reports what
-each pod could use (RDMA device, `UCX_TLS`, `hostNetwork`) and, when deployed
-with `TRANSPORT_LOG=1`, the transport and device UCX logged. The verdict goes
-to `transport.json`, `run-info.json` and the first line of the analysis:
-
-```
-  TRANSPORT: tcp (cross-node, witnessed by byte accounting)
-    KV bytes crossed the pod network (eth0): TCP
-```
+prefill-to-decode pair it sends a few cache-busted requests and records NIXL
+payload counters, interface counters, device capability and UCX configuration.
+When deployed with `TRANSPORT_LOG=1`, it also reports UCX protocol logs. Those
+observations are written to `transport.json` and summarized in the analysis.
+Interface/NIXL counter ratios alone cannot attribute a particular transfer to
+TCP, RDMA or CUDA IPC, so ambiguous paths are reported as `unknown`. UCX lane
+logs and visible devices do not independently establish per-transfer path or
+GPUDirect.
 
 Run it before or between experiments, not during: its requests add load.
 

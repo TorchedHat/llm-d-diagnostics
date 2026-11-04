@@ -6,8 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import transport
-from transport import cuda_ipc_allowed, overall, verdict
+from transport import counter_delta, cuda_ipc_allowed, overall, verdict
 
 
 def cap(rdma=False, host_network=False, cuda_ipc=False, link="Ethernet"):
@@ -46,55 +45,32 @@ class TestCudaIpcAllowed(unittest.TestCase):
 
 
 class TestVerdict(unittest.TestCase):
-    def test_kv_on_pod_interface_is_tcp(self):
-        # The live H100 observation: 511.7 MB NIXL, 525.7 MB on eth0.
-        kind, reason = verdict(pair(511.7e6, 525.7e6), cap(), cap())
-        self.assertEqual(kind, "tcp")
-        self.assertIn("pod network (eth0)", reason)
+    def test_counter_ratios_and_devices_do_not_prove_transport(self):
+        cases = [
+            (pair(511.7e6, 525.7e6), cap(), cap()),
+            (pair(100e6, 1e6), cap(rdma=True), cap(rdma=True)),
+            (pair(100e6, 1e6, same_node=True), cap(), cap(cuda_ipc=True)),
+        ]
+        for evidence, prefill, decode in cases:
+            self.assertEqual(verdict(evidence, prefill, decode)[0], "unknown")
 
-    def test_host_network_tcp_names_host_network(self):
-        kind, reason = verdict(pair(), cap(host_network=True), cap(host_network=True))
-        self.assertEqual(kind, "tcp")
-        self.assertIn("host network", reason)
+    def test_no_external_kv_or_failed_requests(self):
+        self.assertEqual(verdict(pair(nixl_bytes=0, ext_tokens=0), cap(), cap())[0], "no-kv-transfer")
+        self.assertEqual(verdict(pair(ext_tokens=0), cap(), cap())[0], "unknown")
+        self.assertEqual(verdict(pair(ok=0), cap(), cap())[0], "error")
 
-    def test_kv_off_interface_with_roce_devices_is_rdma_roce(self):
-        kind, _ = verdict(pair(100e6, 1e6), cap(rdma=True), cap(rdma=True))
-        self.assertEqual(kind, "rdma-roce")
+    def test_counter_delta_rejects_missing_reset_and_nonfinite_values(self):
+        self.assertEqual(counter_delta(2, 5), 3)
+        for before, after in ((None, 1), (2, 1), (0, float("nan")), (0, float("inf")), (-1, 2)):
+            self.assertIsNone(counter_delta(before, after))
 
-    def test_infiniband_link_layer(self):
-        kind, _ = verdict(pair(100e6, 1e6), cap(rdma=True, link="InfiniBand"),
-                          cap(rdma=True, link="InfiniBand"))
-        self.assertEqual(kind, "rdma-ib")
-
-    def test_rdma_needs_devices_on_both_sides(self):
-        kind, _ = verdict(pair(100e6, 1e6), cap(rdma=False), cap(rdma=True))
-        self.assertEqual(kind, "unexplained")
-
-    def test_same_node_bypass_with_cuda_ipc_allowed(self):
-        kind, _ = verdict(pair(100e6, 1e6, same_node=True), cap(), cap(cuda_ipc=True))
-        self.assertEqual(kind, "cuda-ipc")
-
-    def test_same_node_bypass_without_cuda_ipc_is_not_cuda_ipc(self):
-        kind, _ = verdict(pair(100e6, 1e6, same_node=True), cap(), cap(cuda_ipc=False))
-        self.assertEqual(kind, "unexplained")
-
-    def test_partial_is_mixed(self):
-        kind, _ = verdict(pair(100e6, 50e6), cap(), cap())
-        self.assertEqual(kind, "mixed")
-
-    def test_no_external_kv_means_no_transfer(self):
-        kind, _ = verdict(pair(ext_tokens=0), cap(), cap())
-        self.assertEqual(kind, "no-kv-transfer")
-        kind, _ = verdict(pair(nixl_bytes=0, rx=5e6), cap(), cap())
-        self.assertEqual(kind, "no-kv-transfer")
-
-    def test_all_requests_failed(self):
-        kind, _ = verdict(pair(ok=0), cap(), cap())
-        self.assertEqual(kind, "error")
-
-    def test_thresholds_are_the_documented_ones(self):
-        self.assertEqual(transport.ON_NETDEV_MIN, 0.9)
-        self.assertEqual(transport.OFF_NETDEV_MAX, 0.2)
+    def test_missing_or_reset_counters_are_unknown(self):
+        evidence = pair()
+        evidence["delta"]["nixl_bytes"] = None
+        self.assertEqual(verdict(evidence, cap(), cap())[0], "unknown")
+        evidence = pair()
+        evidence["invalidity"] = ["counter reset"]
+        self.assertEqual(verdict(evidence, cap(), cap())[0], "unknown")
 
 
 class TestOverall(unittest.TestCase):
@@ -124,11 +100,11 @@ class TestWitnessedTransport(unittest.TestCase):
         import client
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, "transport.json"), "w") as f:
-                json.dump({"transport": "tcp", "scope": "cross-node",
+                json.dump({"classifier_version": 2, "transport": "unknown", "scope": "cross-node",
                            "witnessed_at": "2026-10-11T00:00:00+0000", "pairs": []}, f)
             with patch.object(client, "DATA_DIR", d):
                 self.assertEqual(client.witnessed_transport(),
-                                 {"transport": "tcp", "scope": "cross-node",
+                                 {"transport": "unknown", "scope": "cross-node",
                                   "witnessed_at": "2026-10-11T00:00:00+0000"})
 
     def test_missing_witness_is_explicit(self):
@@ -148,14 +124,14 @@ class TestAnalyzeHeader(unittest.TestCase):
         import analyze
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, "transport.json"), "w") as f:
-                json.dump({"transport": "tcp", "scope": "cross-node", "witnessed_at": "t",
+                json.dump({"classifier_version": 2, "transport": "unknown", "scope": "cross-node", "witnessed_at": "t",
                            "pairs": [{"prefill_node": "w-v72kj", "decode_node": "w-s4fxf",
                                       "same_node": False, "transport": "tcp",
                                       "netdev_ratio": 1.03, "nixl_gbps": 0.31}]}, f)
             lines = analyze.transport_summary(d)
-        self.assertEqual(lines[0], "KV transport: tcp (cross-node, witnessed t)")
+        self.assertEqual(lines[0], "KV transport: unknown (cross-node, witnessed t)")
         self.assertEqual(lines[1], "  v72kj -> s4fxf cross-node: tcp, "
-                                   "interface/NIXL bytes 1.03, 0.31 GB/s")
+                                   "interface/NIXL bytes 1.03, 0.31 GB/s payload/recorded transfer time")
 
     def test_header_flags_missing_witness(self):
         import tempfile

@@ -2,7 +2,7 @@
 """Transport witness: which transport the NIXL KV-cache transfer actually uses.
 
 Configuration (UCX_TLS, RDMA resources) says what a transfer *may* use; this
-tool reports what it *did* use, with evidence in three layers:
+tool collects evidence in three layers without claiming per-flow attribution:
 
   1. capability  What each vLLM pod could use: RDMA device files, the RDMA
                  resource request, UCX_TLS / UCX_NET_DEVICES, hostNetwork,
@@ -13,8 +13,7 @@ tool reports what it *did* use, with evidence in three layers:
   3. bytes       For each prefill->decode pair, a burst of cache-busted
                  disaggregated requests; NIXL payload bytes on the decode pod
                  are compared with the bytes its network interfaces received.
-                 KV that crossed the pod network shows up on the interface
-                 (ratio ~1); KV moved by RDMA or CUDA IPC does not (ratio ~0).
+                 A ratio alone does not attribute the observed bytes to a flow.
 
 Runs locally (needs `oc`); requests are sent from the test-client pod, which
 must already hold the toolkit (run.sh preflight copies it).
@@ -30,6 +29,7 @@ Environment:
 """
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -61,7 +61,9 @@ UCX_TRANSPORT_RE = re.compile(
 # Executed inside each vLLM container. Reads only local state.
 PROBE = r'''
 import glob, json, os, re, urllib.request
-out = {"env": {k: v for k, v in os.environ.items() if k.startswith(("UCX_", "NIXL_"))}}
+keys = ("UCX_TLS", "UCX_NET_DEVICES", "UCX_IB_GID_INDEX", "UCX_IB_ADDR_TYPE",
+        "UCX_IB_ROCE_REACHABILITY_MODE", "UCX_MAX_RNDV_RAILS", "UCX_PROTO_INFO")
+out = {"env": {k: os.environ[k] for k in keys if k in os.environ}}
 out["dev_infiniband"] = sorted(os.listdir("/dev/infiniband")) if os.path.isdir("/dev/infiniband") else []
 links = {}
 for d in sorted(glob.glob("/sys/class/infiniband/*")):
@@ -87,12 +89,12 @@ try:
 except Exception as e:
     out["metrics_error"] = str(e)[:200]
 def total(name, label=None):
-    s = 0.0
+    values = []
     for m in re.finditer(r"^" + re.escape(name) + r"(\{[^}]*\})? (\S+)$", text, re.M):
         if label and label not in (m.group(1) or ""):
             continue
-        s += float(m.group(2))
-    return s
+        values.append(float(m.group(2)))
+    return sum(values) if values else None
 out["nixl"] = {
     "bytes": total("vllm:nixl_bytes_transferred_sum"),
     "transfers": total("vllm:nixl_bytes_transferred_count"),
@@ -210,35 +212,41 @@ def choose_prefill(decode, prefills):
 
 
 def verdict(pair, prefill_cap, decode_cap):
-    """Classify one pair from its byte accounting and capabilities."""
+    """Describe whether transfer evidence is sufficient to identify a path."""
     d = pair["delta"]
     if pair["ok"] == 0:
         return "error", "no witness request succeeded"
-    if d["nixl_bytes"] <= 0 or d["external_kv_tokens"] <= 0:
+    if pair.get("invalidity") or d["nixl_bytes"] is None or d["external_kv_tokens"] is None:
+        return "unknown", "metrics or pod continuity missing, changed or reset"
+    if d["nixl_bytes"] == 0 and d["external_kv_tokens"] == 0:
         return "no-kv-transfer", ("decode received no KV over NIXL "
                                   "(recomputed or served from its own cache)")
-    ratio = pair["netdev_ratio"]
-    iface = pair["busiest_netdev"] or "pod interface"
-    if decode_cap["host_network"]:
-        net = f"host network ({iface})"
-    else:
-        net = f"pod network ({iface})"
-    if ratio >= ON_NETDEV_MIN:
-        return "tcp", f"KV bytes crossed the {net}: TCP"
-    if ratio <= OFF_NETDEV_MAX:
-        both_rdma = prefill_cap["rdma_device"] and decode_cap["rdma_device"]
-        if pair["same_node"] and decode_cap["cuda_ipc_allowed"]:
-            return "cuda-ipc", "KV bypassed the network on the same node: CUDA IPC (likely)"
-        if both_rdma:
-            layers = set(decode_cap["hca_link_layers"].values())
-            kind = "roce" if layers == {"Ethernet"} else ("ib" if layers == {"InfiniBand"} else "")
-            return f"rdma-{kind}" if kind else "rdma", "KV bypassed the kernel network stack: RDMA"
-        return "unexplained", ("KV did not cross any pod interface, but no RDMA device "
-                               "or same-node CUDA IPC path explains it")
-    return "mixed", f"only part of the KV crossed the {net} (ratio {ratio:.2f})"
+    if d["nixl_bytes"] <= 0 or d["external_kv_tokens"] <= 0:
+        return "unknown", "NIXL and external-KV counters are inconsistent"
+    return "unknown", ("interface and NIXL counters are not flow attribution; "
+                       "correlate application transfers with selected UCX lanes")
+
+
+def counter_delta(before, after):
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) or value < 0 for value in (before, after)):
+        return None
+    if after < before:
+        return None
+    return after - before
+
+
+def pod_identity(pod):
+    data = json.loads(oc("get", "pod", pod["name"], "-n", NS, "-o", "json"))
+    status = data.get("status", {})
+    containers = status.get("containerStatuses", []) + status.get("initContainerStatuses", [])
+    container = next((c for c in containers if c.get("name") == VLLM_CONTAINER), {})
+    return {"uid": data.get("metadata", {}).get("uid"),
+            "container_id": container.get("containerID"), "restarts": container.get("restartCount")}
 
 
 def witness_pair(prefill, decode, tag):
+    identities = {p["name"]: pod_identity(p) for p in (prefill, decode)}
     before_d = probe(decode)
     env = [f"REMOTE_DIR={REMOTE_DIR}", f"SIDECAR_SCHEME={SIDECAR_SCHEME}",
            f"DECODE_IP={decode['ip']}", f"PREFILL_IP={prefill['ip']}",
@@ -247,30 +255,41 @@ def witness_pair(prefill, decode, tag):
              timeout=60 + 30 * WITNESS_REQUESTS).strip().splitlines()[-1]
     ok_str, _, errors = out.partition(" ")
     after_d = probe(decode)
-
-    nixl = {k: after_d["nixl"][k] - before_d["nixl"][k] for k in after_d["nixl"]}
+    identities_after = {p["name"]: pod_identity(p) for p in (prefill, decode)}
+    invalidity = []
+    if (identities != identities_after or
+            any(any(value is None for value in identity.values()) for identity in identities.values())):
+        invalidity.append("pod or container changed or identity missing")
+    nixl = {k: counter_delta(before_d["nixl"].get(k), after_d["nixl"].get(k))
+            for k in after_d["nixl"]}
+    external = counter_delta(before_d.get("external_kv_tokens"), after_d.get("external_kv_tokens"))
+    if any(v is None for v in nixl.values()) or external is None:
+        invalidity.append("NIXL/source metrics missing or reset")
     netdev = {
-        name: {f: after_d["netdev"][name][f] - before_d["netdev"].get(name, {}).get(f, 0)
+        name: {f: counter_delta(before_d["netdev"].get(name, {}).get(f), after_d["netdev"][name][f])
                for f in ("rx_bytes", "tx_bytes")}
         for name in after_d["netdev"]}
-    rx_total = sum(v["rx_bytes"] for v in netdev.values())
-    busiest = max(netdev, key=lambda n: netdev[n]["rx_bytes"]) if netdev else ""
+    if not netdev or any(v is None for values in netdev.values() for v in values.values()):
+        invalidity.append("interface counters missing or reset")
+    rx_total = sum(v["rx_bytes"] for v in netdev.values()) if not invalidity else None
+    busiest = max(netdev, key=lambda n: netdev[n]["rx_bytes"]) if rx_total is not None else ""
     pair = {
         "prefill": prefill["name"], "prefill_node": prefill["node"],
         "decode": decode["name"], "decode_node": decode["node"],
         "same_node": prefill["node"] == decode["node"],
         "requests": WITNESS_REQUESTS, "prompt_tokens": WITNESS_TOKENS,
         "ok": int(ok_str or 0), "errors": errors,
+        "pod_identities": identities, "invalidity": invalidity,
         "delta": {
             "nixl_bytes": nixl["bytes"], "nixl_transfers": nixl["transfers"],
             "nixl_xfer_seconds": nixl["xfer_seconds"], "nixl_failed": nixl["failed"],
-            "external_kv_tokens": after_d["external_kv_tokens"] - before_d["external_kv_tokens"],
+            "external_kv_tokens": external,
             "netdev": netdev, "netdev_rx_total": rx_total,
         },
         "busiest_netdev": busiest,
-        "netdev_ratio": rx_total / nixl["bytes"] if nixl["bytes"] > 0 else None,
+        "netdev_ratio": rx_total / nixl["bytes"] if rx_total is not None and nixl["bytes"] else None,
         "nixl_gbps": (nixl["bytes"] / nixl["xfer_seconds"] / 1e9
-                      if nixl["xfer_seconds"] > 0 else None),
+                      if nixl["bytes"] is not None and nixl["xfer_seconds"] else None),
     }
     return pair
 
@@ -332,9 +351,11 @@ def main():
         d = pair["delta"]
         ratio = f"{pair['netdev_ratio']:.2f}" if pair["netdev_ratio"] is not None else "n/a"
         gbps = f"{pair['nixl_gbps']:.2f} GB/s" if pair["nixl_gbps"] else "n/a"
+        nixl_mb = f"{d['nixl_bytes'] / 1e6:.1f}" if d["nixl_bytes"] is not None else "n/a"
+        rx_mb = f"{d['netdev_rx_total'] / 1e6:.1f}" if d["netdev_rx_total"] is not None else "n/a"
         where = "same-node " if pair["same_node"] else "cross-node"
         print(f"    {short_node(pair['prefill_node'])} -> {short_node(pair['decode_node'])} {where} "
-              f"NIXL {d['nixl_bytes'] / 1e6:8.1f} MB  netdev rx {d['netdev_rx_total'] / 1e6:8.1f} MB  "
+              f"NIXL {nixl_mb:>8} MB  netdev rx {rx_mb:>8} MB  "
               f"ratio {ratio}  {gbps}  => {pair['transport']}")
         if pair["errors"]:
             print(f"      errors: {pair['errors']}")
@@ -348,6 +369,7 @@ def main():
     print("")
 
     result = {
+        "classifier_version": 2,
         "transport": transport,
         "scope": scope,
         "witnessed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

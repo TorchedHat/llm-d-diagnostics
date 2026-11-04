@@ -2462,7 +2462,9 @@ def transport_summary(data_dir):
     except (OSError, ValueError):
         return ["KV transport: NOT WITNESSED. Latency and bandwidth numbers cannot be "
                 "attributed to TCP or RDMA (run: ./toolkit/run.sh <cluster> transport)"]
-    lines = [f"KV transport: {witness.get('transport')} "
+    legacy = witness.get("classifier_version") != 2
+    verdict = "unknown (legacy classifier needs requalification)" if legacy else witness.get("transport")
+    lines = [f"KV transport: {verdict} "
              f"({witness.get('scope')}, witnessed {witness.get('witnessed_at')})"]
     for pair in witness.get("pairs", []):
         ratio = pair.get("netdev_ratio")
@@ -2471,9 +2473,9 @@ def transport_summary(data_dir):
         lines.append(
             f"  {pair.get('prefill_node', '?').rsplit('-', 1)[-1]} -> "
             f"{pair.get('decode_node', '?').rsplit('-', 1)[-1]} {where}: "
-            f"{pair.get('transport')}, interface/NIXL bytes "
+            f"{'legacy label ' if legacy else ''}{pair.get('transport')}, interface/NIXL bytes "
             f"{'n/a' if ratio is None else f'{ratio:.2f}'}, "
-            f"{'n/a' if not gbps else f'{gbps:.2f} GB/s'}")
+            f"{'n/a' if not gbps else f'{gbps:.2f} GB/s payload/recorded transfer time'}")
     return lines
 
 
