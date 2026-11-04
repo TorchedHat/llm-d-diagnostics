@@ -277,28 +277,50 @@ run_remote() {
 }
 
 # ── Metrics collector (background, in-pod) ──────────────────────────────────
-METRICS_PID_FILE="/tmp/metrics-collector-$NS.pid"
+METRICS_STARTED=0
+METRICS_OWNER_FILE="$REMOTE_DATA/.metrics-owner.json"
 
 start_metrics() {
     echo "Starting metrics collector (background, in-pod)..."
+    METRICS_POD_UID=$(oc get pod "$POD" -n "$NS" -o jsonpath='{.metadata.uid}')
+    if [[ -z "$METRICS_POD_UID" ]]; then
+        echo "ERROR: collector pod UID is unavailable" >&2
+        return 1
+    fi
+    METRICS_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    METRICS_STARTED=1
     oc exec "$POD" -n "$NS" -- env $REMOTE_ENV SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-2}" \
-        python3 "$REMOTE_DIR/metrics_collector.py" &
+        python3 "$REMOTE_DIR/owned_process.py" start "$METRICS_OWNER_FILE" "$METRICS_TOKEN" \
+        "$REMOTE_DIR/metrics_collector.py" &
     METRICS_BG_PID=$!
-    echo "$METRICS_BG_PID" > "$METRICS_PID_FILE"
+    local attempt
+    for attempt in {1..40}; do
+        if ! kill -0 "$METRICS_BG_PID" 2>/dev/null; then
+            echo "ERROR: metrics collector failed to start" >&2
+            return 1
+        fi
+        if oc exec "$POD" -n "$NS" -- python3 "$REMOTE_DIR/owned_process.py" check \
+                "$METRICS_OWNER_FILE" "$METRICS_TOKEN" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    echo "ERROR: collector identity not recorded; do not copy results" >&2
+    return 1
 }
 
 stop_metrics() {
-    if [ -f "$METRICS_PID_FILE" ]; then
-        local pid
-        pid=$(cat "$METRICS_PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
-        rm -f "$METRICS_PID_FILE"
+    [ "$METRICS_STARTED" = 1 ] || return 0
+    local current_uid
+    current_uid=$(oc get pod "$POD" -n "$NS" -o jsonpath='{.metadata.uid}') || return 1
+    if [[ "$current_uid" != "$METRICS_POD_UID" ]]; then
+        echo "ERROR: collector pod changed; not signaling a replacement pod" >&2
+        return 1
     fi
-    # Killing the local `oc exec` does not stop the collector inside the pod.
-    oc exec "$POD" -n "$NS" -- pkill -f metrics_collector.py 2>/dev/null || true
+    oc exec "$POD" -n "$NS" -- python3 "$REMOTE_DIR/owned_process.py" stop \
+        "$METRICS_OWNER_FILE" "$METRICS_TOKEN" || return 1
+    METRICS_STARTED=0
+    wait "$METRICS_BG_PID" 2>/dev/null || true
 }
 
 # ── Copy results back ─────────────────────────────────────────────────────
@@ -338,8 +360,8 @@ run_single() {
     local script="$2"
 
     preflight || exit 1
-    start_metrics
     trap stop_metrics EXIT
+    start_metrics
 
     run_remote "$label" "$script"
 
@@ -387,8 +409,8 @@ case "$COMMAND" in
         # Ordered by information density: decompose first (most informative),
         # saturation last (early-stops when system collapses).
         preflight || exit 1
-        start_metrics
         trap stop_metrics EXIT
+        start_metrics
 
         run_remote "Latency Decomposition" exp1b_decompose.py
         run_remote "Latency Sweep" exp1_latency.py

@@ -225,6 +225,11 @@ In the test-client pod, results accumulate under
 `/scripts/toolkit/data/<cluster-name>/`, one directory per cluster config,
 because the pod outlives redeployments.
 
+The background metrics collector records an owner token and process identity.
+Before copying results, the wrapper stops only that collector and verifies its
+pod and process identity. If ownership cannot be established, copying stops and
+the remote artifacts remain available for inspection.
+
 ### CSV schema (performance experiments)
 
 All experiments write CSV with at least:
