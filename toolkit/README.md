@@ -6,6 +6,9 @@ Point it at a cluster, run experiments, get reproducible data.
 
 Python 3.8+, zero external dependencies (stdlib only).
 
+The read-only [hardware inventory](../docs/hardware-inventory.md) records
+pod-visible GPU, network, CPU and software information before a comparison.
+
 ## Architecture
 
 Three layers, two execution domains:
