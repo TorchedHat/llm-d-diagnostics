@@ -150,7 +150,7 @@ def main():
             warmup_prompt = build_prompt(ptokens)
             for _config_name, conn_pool, _pod_name in active_configs:
                 for conn in conn_pool:
-                    conn.warmup(warmup_prompt, MAX_TOKENS)
+                    conn.warmup(warmup_prompt, MAX_TOKENS, unique=True)
 
             for config_name, conn_pool, pod_name in active_configs:
                 progress(f"  {config_name}: ", end="")

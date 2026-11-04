@@ -5,11 +5,13 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import analyze
+import exp11_tput_seqlen as exp11
 from kv_sources import delta, summary_line
 
 import client
@@ -67,13 +69,32 @@ class TestPromptNonce(unittest.TestCase):
         b = build_prompt(500, cache_bust=("exp1", 500, "BASELINE", 2)).split()
         self.assertNotEqual(a[:8], b[:8])
 
+    def test_exp11_uses_distinct_keys_across_concurrency_and_warmups(self):
+        keys = []
+        def record(tokens, cache_bust=None):
+            keys.append(cache_bust)
+            return build_prompt(tokens, cache_bust=cache_bust)
+        response = SimpleNamespace(ttft_ms=1, total_ms=2, status=200, prompt_tokens=100,
+                                   completion_tokens=2, error="")
+        with tempfile.TemporaryDirectory() as d, patch.multiple(
+            exp11, DATA_DIR=d, SWEEP_LENGTHS=[100], CONCURRENCY_LEVELS=[1, 2],
+            CONFIGS=[exp11.ConfigThroughput.BASELINE], TOTAL_REQUESTS=2, WARMUP=1,
+            build_prompt=record, send_request=lambda *args, **kwargs: response,
+            write_run_info=lambda *args: None, print_config=lambda: None,
+            progress=lambda *args, **kwargs: None, dot=lambda: None,
+        ):
+            exp11.main()
+        self.assertEqual(len(keys), 6)
+        self.assertEqual(len(set(keys)), 6)
+        self.assertEqual(sum(key[0] == "exp11-warmup" for key in keys), 2)
+
 
 def snap(pods, t="t"):
     return {"taken_at": t, "pods": pods}
 
 
 def pod(role, compute=0, hit=0, ext=0, nbytes=0, transfers=0):
-    return {"role": role, "node": "n",
+    return {"role": role, "node": "n", "uid": "uid", "container_id": "id", "restart_count": 0,
             "sources": {"local_compute": compute, "local_cache_hit": hit,
                         "external_kv_transfer": ext},
             "nixl_bytes": nbytes, "nixl_transfers": transfers}
@@ -110,6 +131,24 @@ class TestDelta(unittest.TestCase):
         d = delta(snap({"p": pod("prefill")}), snap({"p": pod("prefill")}))
         self.assertIsNone(d["roles"]["prefill"]["cache_hit_fraction"])
         self.assertEqual(summary_line(d), "no prompt tokens recorded")
+
+    def test_same_pod_restart_and_counter_reset_are_not_counted(self):
+        old = pod("decode", ext=20, nbytes=30)
+        restarted = pod("decode", ext=25, nbytes=35)
+        restarted["restart_count"] = 1
+        result = delta(snap({"d": old}), snap({"d": restarted}))
+        self.assertEqual(result["skipped_pods"], ["d"])
+        reset = delta(snap({"d": old}), snap({"d": pod("decode", ext=1, nbytes=1)}))
+        self.assertEqual(reset["skipped_pods"], ["d"])
+        invalid = pod("decode", ext=float("nan"))
+        result = delta(snap({"d": old}), snap({"d": invalid}))
+        self.assertEqual(result["skipped_pods"], ["d"])
+
+    def test_missing_metric_is_unknown(self):
+        old, new = pod("decode"), pod("decode", ext=4)
+        new["nixl_bytes"] = None
+        result = delta(snap({"d": old}), snap({"d": new}))
+        self.assertIsNone(result["roles"]["decode"]["nixl_bytes_per_external_token"])
 
 
 class TestAnalyzeAccounting(unittest.TestCase):
@@ -160,6 +199,15 @@ class TestAnalyzeAccounting(unittest.TestCase):
     def test_no_accounting_data(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(analyze.kv_accounting(d), [])
+
+    def test_skipped_and_unavailable_scrapes_are_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "kv-sources"))
+            with open(os.path.join(d, "kv-sources", "exp11.json"), "w") as f:
+                json.dump({"roles": {}, "skipped_pods": ["decoder"]}, f)
+            lines = "\n".join(analyze.kv_accounting(d))
+        self.assertIn("skipped pods: decoder", lines)
+        self.assertIn("no usable KV accounting data", lines)
 
 
 if __name__ == "__main__":

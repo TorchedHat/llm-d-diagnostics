@@ -101,8 +101,6 @@ def main():
     for max_tokens in OUTPUT_LENGTHS:
         progress(f"--- Max tokens: {max_tokens} ---")
 
-        warmup_prompt = build_prompt(PROMPT_TOKENS)
-
         config_order = list(CONFIGS)
         random.shuffle(config_order)
 
@@ -110,6 +108,8 @@ def main():
             progress(f"  {config_name}: ", end="")
 
             for i in range(WARMUP):
+                warmup_prompt = build_prompt(PROMPT_TOKENS, cache_bust=(
+                    "exp12-warmup", max_tokens, str(config_name), i))
                 if config_name == ConfigThroughput.BASELINE:
                     send_request(BASELINE_URL, warmup_prompt, max_tokens)
                 elif config_name == ConfigThroughput.DISAGG_EPP:

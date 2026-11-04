@@ -2413,13 +2413,21 @@ def kv_accounting(data_dir):
                    if not p.endswith((".before.json", ".after.json")))
     if not paths:
         return []
-    rows = []
+    rows, incomplete = [], []
     for path in paths:
         try:
             with open(path) as f:
                 d = json.load(f)
         except (OSError, ValueError):
+            incomplete.append(f"  WARNING {os.path.basename(path)}: KV accounting could not be read")
             continue
+        if d.get("skipped_pods"):
+            incomplete.append(f"  WARNING {os.path.basename(path)}: KV accounting skipped pods: "
+                              + ", ".join(d["skipped_pods"]))
+        if not d.get("roles"):
+            incomplete.append(f"  WARNING {os.path.basename(path)}: no usable KV accounting data")
+        if any(r.get("nixl_complete") is False for r in d.get("roles", {}).values()):
+            incomplete.append(f"  WARNING {os.path.basename(path)}: NIXL counters are incomplete")
         rows.append((os.path.basename(path)[:-len(".json")], d.get("roles", {})))
     per_token = sorted(r["decode"]["nixl_bytes_per_external_token"] for _, r in rows
                        if r.get("decode", {}).get("nixl_bytes_per_external_token"))
@@ -2449,7 +2457,7 @@ def kv_accounting(data_dir):
             warnings.append(
                 f"  WARNING {exp}: {bpt / 1024:.0f} KiB per NIXL token vs {reference / 1024:.0f} "
                 f"KiB in the other experiments; KV size per token is a model constant")
-    return lines + warnings
+    return lines + warnings + incomplete
 
 
 def main():

@@ -113,8 +113,9 @@ def main():
 
             progress(f"  {config_name}: ", end="")
 
-            warmup_prompt = build_prompt(PROMPT_TOKENS)
             for i in range(WARMUP):
+                warmup_prompt = build_prompt(PROMPT_TOKENS, cache_bust=(
+                    "exp13-warmup", concurrency, str(config_name), i))
                 if config_name == ConfigThroughput.BASELINE:
                     send_request(BASELINE_URL, warmup_prompt, MAX_TOKENS)
                 elif config_name == ConfigThroughput.DISAGG_EPP:

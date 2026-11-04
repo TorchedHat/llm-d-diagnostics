@@ -25,6 +25,7 @@ Environment:
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -42,11 +43,11 @@ import json, os, re, urllib.request
 text = urllib.request.urlopen(
     f"http://127.0.0.1:{os.environ['PROBE_PORT']}/metrics", timeout=5).read().decode()
 def total(name, label=None):
-    s = 0.0
+    values = []
     for m in re.finditer(r"^" + re.escape(name) + r"(\{[^}]*\})? (\S+)$", text, re.M):
         if label is None or label in (m.group(1) or ""):
-            s += float(m.group(2))
-    return s
+            values.append(float(m.group(2)))
+    return sum(values) if values else None
 print(json.dumps({
     "sources": {src: total("vllm:prompt_tokens_by_source_total", f'source="{src}"')
                 for src in ("local_compute", "local_cache_hit", "external_kv_transfer")},
@@ -71,12 +72,18 @@ def snapshot():
         if p.get("status", {}).get("phase") != "Running":
             continue
         name, role = p["metadata"]["name"], p["metadata"]["labels"][ROLE_LABEL]
+        statuses = (p.get("status", {}).get("containerStatuses", []) +
+                    p.get("status", {}).get("initContainerStatuses", []))
+        container = next((s for s in statuses if s.get("name") == VLLM_CONTAINER), {})
+        identity = {"uid": p["metadata"].get("uid"),
+                    "container_id": container.get("containerID"),
+                    "restart_count": container.get("restartCount")}
         try:
             out = oc("exec", "-n", NS, name, "-c", VLLM_CONTAINER, "--",
                      "env", f"PROBE_PORT={VLLM_PORT[role]}", "python3", "-c", PROBE)
-            pods[name] = {"role": role, "node": p["spec"].get("nodeName", ""),
+            pods[name] = {"role": role, "node": p["spec"].get("nodeName", ""), **identity,
                           **json.loads(out.strip().splitlines()[-1])}
-        except (RuntimeError, ValueError) as e:
+        except (RuntimeError, ValueError, IndexError, subprocess.SubprocessError) as e:
             pods[name] = {"role": role, "error": str(e)[:200]}
     return {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "pods": pods}
 
@@ -89,26 +96,59 @@ def delta(before, after):
     """
     roles = {}
     skipped = []
+    reasons = {}
+    def valid(value):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0)
+
+    def skip(name, reason):
+        skipped.append(name)
+        reasons[name] = reason
+
     for name, a in after["pods"].items():
         b = before["pods"].get(name)
         if b is None or "error" in a or "error" in b:
-            skipped.append(name)
+            skip(name, "missing snapshot or scrape failed")
+            continue
+        identity = ("uid", "container_id", "restart_count", "role", "node")
+        if any(b.get(key) is None or a.get(key) is None or b[key] != a[key]
+               for key in identity):
+            skip(name, "pod or container identity unavailable or changed")
+            continue
+        values = [(b.get("sources", {}).get(s), a.get("sources", {}).get(s)) for s in SOURCES]
+        if any(not valid(x) or not valid(y) or y < x for x, y in values):
+            skip(name, "source counter missing or reset")
+            continue
+        optional = [(b.get(k), a.get(k)) for k in ("nixl_bytes", "nixl_transfers")]
+        if any((x is not None and not valid(x)) or (y is not None and not valid(y))
+               or (x is not None and y is not None and y < x) for x, y in optional):
+            skip(name, "NIXL counter reset")
             continue
         r = roles.setdefault(a["role"], {**{s: 0.0 for s in SOURCES},
-                                         "nixl_bytes": 0.0, "nixl_transfers": 0.0})
+                                         "nixl_bytes": 0.0, "nixl_transfers": 0.0,
+                                         "nixl_complete": True})
         for s in SOURCES:
             r[s] += a["sources"][s] - b["sources"][s]
-        r["nixl_bytes"] += a["nixl_bytes"] - b["nixl_bytes"]
-        r["nixl_transfers"] += a["nixl_transfers"] - b["nixl_transfers"]
-    skipped += [n for n in before["pods"] if n not in after["pods"]]
+        if any(x is None or y is None for x, y in optional):
+            r["nixl_complete"] = False
+        else:
+            r["nixl_bytes"] += a["nixl_bytes"] - b["nixl_bytes"]
+            r["nixl_transfers"] += a["nixl_transfers"] - b["nixl_transfers"]
+    for n in before["pods"]:
+        if n not in after["pods"]:
+            skip(n, "missing after snapshot")
     for r in roles.values():
         tokens = sum(r[s] for s in SOURCES)
         r["prompt_tokens"] = tokens
         r["cache_hit_fraction"] = r["local_cache_hit"] / tokens if tokens else None
         ext = r["external_kv_transfer"]
-        r["nixl_bytes_per_external_token"] = r["nixl_bytes"] / ext if ext else None
+        if not r["nixl_complete"]:
+            r["nixl_bytes"] = r["nixl_transfers"] = None
+        r["nixl_bytes_per_external_token"] = (r["nixl_bytes"] / ext
+                                                if ext and r["nixl_complete"] else None)
     return {"from": before["taken_at"], "to": after["taken_at"],
-            "roles": roles, "skipped_pods": sorted(set(skipped))}
+            "roles": roles, "skipped_pods": sorted(set(skipped)), "skip_reasons": reasons,
+            "includes_warmup": True}
 
 
 def summary_line(d):
@@ -119,7 +159,7 @@ def summary_line(d):
             continue
         part = (f"{role}: {r['prompt_tokens']:.0f} prompt tokens, "
                 f"{100 * r['cache_hit_fraction']:.1f}% prefix-cache hits")
-        if role == "decode" and r["external_kv_transfer"]:
+        if role == "decode" and r["external_kv_transfer"] and r["nixl_bytes_per_external_token"] is not None:
             part += (f", {r['external_kv_transfer']:.0f} via NIXL "
                      f"({r['nixl_bytes_per_external_token'] / 1024:.0f} KiB/token)")
         parts.append(part)

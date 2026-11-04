@@ -103,8 +103,6 @@ def main():
         for ptokens in SWEEP_LENGTHS:
             progress(f"--- Prompt: {ptokens} tokens ---")
 
-            warmup_prompt = build_prompt(ptokens)
-
             config_order = list(CONFIGS)
             random.shuffle(config_order)
 
@@ -112,6 +110,8 @@ def main():
                 progress(f"  {config_name}: ", end="")
 
                 for i in range(WARMUP):
+                    warmup_prompt = build_prompt(ptokens, cache_bust=(
+                        "exp11-warmup", concurrency, ptokens, str(config_name), i))
                     if config_name == ConfigThroughput.BASELINE:
                         send_request(BASELINE_URL, warmup_prompt, MAX_TOKENS)
                     elif config_name == ConfigThroughput.DISAGG_EPP:
@@ -135,7 +135,8 @@ def main():
                             run += 1
                             run_num = run
                             prompt = build_prompt(ptokens,
-                                                  cache_bust=(ptokens, str(config_name), run_num))
+                                                  cache_bust=(ptokens, concurrency,
+                                                              str(config_name), run_num))
 
                             if config_name == ConfigThroughput.BASELINE:
                                 f = pool.submit(send_one, BASELINE_URL, None,
