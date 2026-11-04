@@ -1,14 +1,20 @@
 # disagg-advisor
 
-**The only tool that tells you whether to disaggregate.**
-
-Every other tool in the ecosystem benchmarks, simulates, or monitors -- none of them answer the question. disagg-advisor does: give it a model and a GPU, and it tells you yes or no, with the math to back it up.
+The advisor offers a model- and GPU-based planning heuristic. Treat its output as a
+hypothesis to check against measurements of your workload and deployment; its accuracy
+is not established for every model, GPU or serving configuration.
 
 No dependencies. No setup. One command.
 
 ```bash
 python3 advisor/plan.py --model meta-llama/Llama-3.1-8B-Instruct --gpu-type h100
 ```
+
+## Measured evidence
+
+The [measured evidence comparator](../docs/measured-evidence.md) compares paired
+request-level results with explicit SLO and GPU-budget gates. It can abstain when
+evidence is incomplete and does not predict unmeasured configurations.
 
 ## What you get
 
