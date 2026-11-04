@@ -379,6 +379,7 @@ def analyze(directories, output, legacy=False):
             )
             if good != row["slo_good"] or sum(r["success"] for r in requests) != row["successful"]:
                 raise ValueError(f"SLO or success count mismatch: {path}")
+            attempted = positive(row["attempted"], "attempted", integer=True)
             expected = (
                 good
                 / positive(row["wall_seconds"], "wall_seconds")
@@ -400,6 +401,7 @@ def analyze(directories, output, legacy=False):
                 {
                     **row,
                     "directory": str(path.parent),
+                    "observed_slo_attainment": good / attempted,
                     "prompt_hashes": {str(r["request"]): r["prompt_sha256"] for r in requests},
                 }
             )
@@ -445,6 +447,11 @@ def analyze(directories, output, legacy=False):
                     "pd_arm": pd["arm"],
                     "monolithic_goodput": mono["goodput_rps_per_gpu"],
                     "pd_goodput": pd["goodput_rps_per_gpu"],
+                    "monolithic_attempted": mono["attempted"],
+                    "pd_attempted": pd["attempted"],
+                    "monolithic_slo_attainment": mono["observed_slo_attainment"],
+                    "pd_slo_attainment": pd["observed_slo_attainment"],
+                    "gpu_allocation_verified": False,
                     "pd_wins": pd["goodput_rps_per_gpu"] > mono["goodput_rps_per_gpu"],
                 }
             )
@@ -462,6 +469,8 @@ def analyze(directories, output, legacy=False):
             "comparisons": len(comparisons),
             "interpretation": "sampled operating points; later reversals retained; no statistically established crossover threshold",
             "gpu_count": "declared total across prefill and decode; independently verify deployment resources",
+            "slo_attainment": "fraction of all attempted requests meeting both targets; not a population guarantee",
+            "pd_wins_scope": "relative measured goodput only; not a qualified deployment recommendation",
         },
     )
     manifest(output)

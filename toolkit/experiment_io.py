@@ -330,6 +330,16 @@ def delta(before, after, pod, metric, source=None):
             [line for line in s["pods"][name] if line.startswith("process_start_time_seconds")]
             for s in (before, after)
         ]
+        if any(len(samples) != 1 for samples in starts):
+            raise ValueError(f"missing or ambiguous process identity: {name}")
+        for samples in starts:
+            match = SAMPLE.match(samples[0])
+            if not match or match[1] != "process_start_time_seconds":
+                raise ValueError(f"invalid process identity: {name}")
+            try:
+                positive(float(match[3]), "process_start_time_seconds")
+            except ValueError as exc:
+                raise ValueError(f"invalid process identity: {name}") from exc
         if starts[0] != starts[1]:
             raise ValueError(f"process restarted: {name}")
     value = counter(after, pod, metric, source) - counter(before, pod, metric, source)

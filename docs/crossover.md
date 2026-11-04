@@ -83,6 +83,11 @@ checks saved token-ID prompts and source-counter accounting,
 rejects duplicate/incompatible cells, and writes `cells.json`,
 `comparisons.json` and `comparisons.csv`. All sampled comparisons and later
 reversals are preserved. Unmatched cells do not imply a crossover.
+Comparisons include observed joint-SLO attainment as a fraction of all attempted
+requests for each arm, including failures. `pd_wins` describes relative sampled
+goodput; it does not establish acceptable absolute SLO attainment or a deployment
+recommendation. Allocation is marked unverified because counts are declarations.
+Source counter deltas require an unambiguous, unchanged process start time.
 
 Original poster data can be read explicitly with `analyze --legacy-poster`.
 Old completion markers/counts are checked; this does not retrospectively
