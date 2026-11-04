@@ -1,0 +1,120 @@
+{
+  "model": "Qwen/Qwen3-32B-FP8",
+  "tokenize_url": "http://mono0:8000/tokenize",
+  "prompt_lengths": [
+    512,
+    8000
+  ],
+  "concurrency_levels": [
+    1,
+    4,
+    16
+  ],
+  "requests": 100,
+  "output_tokens": 256,
+  "repeats": 1,
+  "warmup": 3,
+  "slo_ttft_ms": 2000,
+  "slo_itl_ms": 50,
+  "deployment_settings": {
+    "weight_dtype": "fp8",
+    "kv_dtype": "bf16",
+    "tensor_parallel_size": 1
+  },
+  "arms": [
+    {
+      "name": "mono",
+      "kind": "monolithic",
+      "instances": [
+        {
+          "label": "mono0",
+          "role": "monolithic",
+          "gpus": 1,
+          "metrics_url": "http://mono0:8000/metrics"
+        },
+        {
+          "label": "mono1",
+          "role": "monolithic",
+          "gpus": 1,
+          "metrics_url": "http://mono1:8000/metrics"
+        },
+        {
+          "label": "mono2",
+          "role": "monolithic",
+          "gpus": 1,
+          "metrics_url": "http://mono2:8000/metrics"
+        },
+        {
+          "label": "mono3",
+          "role": "monolithic",
+          "gpus": 1,
+          "metrics_url": "http://mono3:8000/metrics"
+        }
+      ],
+      "targets": [
+        {
+          "label": "mono0",
+          "url": "http://mono0:8000/v1/completions"
+        },
+        {
+          "label": "mono1",
+          "url": "http://mono1:8000/v1/completions"
+        },
+        {
+          "label": "mono2",
+          "url": "http://mono2:8000/v1/completions"
+        },
+        {
+          "label": "mono3",
+          "url": "http://mono3:8000/v1/completions"
+        }
+      ]
+    },
+    {
+      "name": "pd",
+      "kind": "pd",
+      "instances": [
+        {
+          "label": "p0",
+          "role": "prefill",
+          "gpus": 1,
+          "metrics_url": "http://prefill0:8000/metrics"
+        },
+        {
+          "label": "p1",
+          "role": "prefill",
+          "gpus": 1,
+          "metrics_url": "http://prefill1:8000/metrics"
+        },
+        {
+          "label": "d0",
+          "role": "decode",
+          "gpus": 1,
+          "metrics_url": "http://decode0:8001/metrics"
+        },
+        {
+          "label": "d1",
+          "role": "decode",
+          "gpus": 1,
+          "metrics_url": "http://decode1:8001/metrics"
+        }
+      ],
+      "targets": [
+        {
+          "label": "d0",
+          "url": "http://decode0:8000/v1/completions",
+          "headers": {
+            "x-prefiller-host-port": "prefill1:8000"
+          }
+        },
+        {
+          "label": "d1",
+          "url": "http://decode1:8000/v1/completions",
+          "headers": {
+            "x-prefiller-host-port": "prefill0:8000"
+          }
+        }
+      ]
+    }
+  ]
+}
