@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -59,6 +60,36 @@ class TestPressureCount(unittest.TestCase):
         with patch.object(exp10, "PRESSURE_PROMPTS_N", "auto"), \
              patch.object(exp10, "progress"):
             self.assertEqual(exp10.pressure_prompt_count(None), exp10.PRESSURE_FALLBACK_N)
+
+
+class TestStreamedCacheTiming(unittest.TestCase):
+    def test_distributions_use_streamed_first_token(self):
+        rows = []
+        writer = SimpleNamespace(write=rows.append)
+        def result(ttft):
+            return SimpleNamespace(ttft_ms=ttft, total_ms=500, status=200, error="",
+                                   token_times=(ttft / 1000,), prompt_tokens=100, completion_tokens=1)
+        samples = iter([result(200), result(200), result(100), result(210), result(200), result(110)])
+        conn = SimpleNamespace(pod_name="decode", send_streaming=lambda *args: next(samples))
+        with patch.object(exp10, "progress"), patch.object(exp10, "dot"):
+            cold, warm, threshold = exp10.establish_distributions(conn, writer, n=2)
+        self.assertEqual(cold, [200, 210])
+        self.assertEqual(warm, [100, 110])
+        self.assertEqual(threshold, 155)
+        self.assertEqual(len(rows), 4)
+
+    def test_missing_first_token_is_not_classified_as_a_hit(self):
+        result = SimpleNamespace(status=200, error="", token_times=())
+        with self.assertRaisesRegex(RuntimeError, "valid streamed first token"):
+            exp10.require_streamed_ttft(result)
+
+    def test_overlapping_cold_and_warm_samples_have_no_threshold(self):
+        result = SimpleNamespace(ttft_ms=100, total_ms=150, status=200, error="",
+                                 token_times=(.1,), prompt_tokens=100, completion_tokens=1)
+        conn = SimpleNamespace(pod_name="decode", send_streaming=lambda *args: result)
+        with patch.object(exp10, "progress"), patch.object(exp10, "dot"):
+            with self.assertRaisesRegex(ValueError, "quartiles overlap"):
+                exp10.establish_distributions(conn, SimpleNamespace(write=lambda _: None), n=2)
 
 
 if __name__ == "__main__":

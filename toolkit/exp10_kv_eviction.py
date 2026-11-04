@@ -11,7 +11,7 @@ pinning sessions to a specific decode pod.
 Method:
     1. Establish cold and warm TTFT distributions (10 samples each).
        The decision boundary is the midpoint between warm p75 and cold p25,
-       providing a statistically grounded threshold rather than an arbitrary
+       an empirical threshold rather than an arbitrary
        midpoint from single measurements.
     2. Delay sweep: for each delay in EVICTION_DELAYS:
        a. Warm the cache by sending the prompt.
@@ -149,12 +149,18 @@ def bg_sender(bg_conn, stop_event):
         bg_conn.close()
 
 
+def require_streamed_ttft(result):
+    if result.status != 200 or result.error or not result.token_times:
+        raise RuntimeError("cache measurement did not return a valid streamed first token")
+    return result
+
+
 def establish_distributions(conn, writer, n=10):
     """Measure cold and warm TTFT distributions for proper classification.
 
     Returns (cold_ttfts, warm_ttfts, threshold) where threshold is the
-    midpoint between the warm p75 and cold p25 — a statistically grounded
-    decision boundary rather than an arbitrary midpoint of single values.
+    midpoint between the warm p75 and cold p25. Overlapping sample quartiles
+    cannot establish this threshold.
     """
     progress("  Establishing cold/warm distributions...")
     cold_ttfts = []
@@ -162,15 +168,15 @@ def establish_distributions(conn, writer, n=10):
     for i in range(n):
         # Cold: a prompt no pod has seen (new every sample and invocation)
         cold_prompt = build_prompt(CACHE_PROMPT_TOKENS, cache_bust=("exp10", "cold", i))
-        r = conn.send(cold_prompt, MAX_TOKENS)
-        cold_ttfts.append(r.ttft_ms)
+        r = conn.send_streaming(cold_prompt, MAX_TOKENS)
         record(writer, conn.pod_name, i + 1, 0, False, EvictionPhase.DIST_COLD, r)
+        cold_ttfts.append(require_streamed_ttft(r).ttft_ms)
 
         # Warm: send CACHE_PROMPT, then immediately resend (guaranteed hit)
-        conn.send(CACHE_PROMPT, MAX_TOKENS)  # prime
-        r = conn.send(CACHE_PROMPT, MAX_TOKENS)  # hit
-        warm_ttfts.append(r.ttft_ms)
+        require_streamed_ttft(conn.send_streaming(CACHE_PROMPT, MAX_TOKENS))  # prime
+        r = conn.send_streaming(CACHE_PROMPT, MAX_TOKENS)  # hit
         record(writer, conn.pod_name, i + 1, 0, False, EvictionPhase.DIST_WARM, r)
+        warm_ttfts.append(require_streamed_ttft(r).ttft_ms)
         dot()
 
     cold_ttfts.sort()
@@ -179,6 +185,8 @@ def establish_distributions(conn, writer, n=10):
     # This separates the distributions where they're closest
     cold_p25 = cold_ttfts[len(cold_ttfts) // 4]
     warm_p75 = warm_ttfts[3 * len(warm_ttfts) // 4]
+    if cold_p25 <= warm_p75:
+        raise ValueError("cold and warm sample quartiles overlap; cache-hit threshold is unavailable")
     threshold = (cold_p25 + warm_p75) / 2.0
 
     progress(" done")
@@ -220,14 +228,18 @@ def run_sweep(conn, writer, bg_load, threshold):
                      end="")
 
             # Warm the cache (fresh for each trial)
-            r_warm = conn.send(CACHE_PROMPT, MAX_TOKENS)
+            r_warm = conn.send_streaming(CACHE_PROMPT, MAX_TOKENS)
             record(writer, conn.pod_name, run, delay, bg_load, phase_warm, r_warm)
+            require_streamed_ttft(r_warm)
 
             # Wait
             time.sleep(delay)
 
             # Resend same prompt
-            r_after = conn.send(CACHE_PROMPT, MAX_TOKENS)
+            r_after = conn.send_streaming(CACHE_PROMPT, MAX_TOKENS)
+            if r_after.status != 200 or r_after.error or not r_after.token_times:
+                record(writer, conn.pod_name, run, delay, bg_load, phase_after, r_after)
+                require_streamed_ttft(r_after)
             hit = CacheHit.YES if r_after.ttft_ms < threshold else CacheHit.NO
             record(writer, conn.pod_name, run, delay, bg_load, phase_after, r_after, cache_hit=hit)
             progress(f"{'HIT' if hit == CacheHit.YES else 'MISS'} "
@@ -247,9 +259,10 @@ def run_pressure_test(conn, writer, threshold, n_prompts):
     progress(f"  Cache pressure test ({n_prompts} prompts per run):")
     for run in range(1, EVICTION_RUNS + 1):
         # Warm the target cache entry
-        conn.send(CACHE_PROMPT, MAX_TOKENS)
-        r_warm = conn.send(CACHE_PROMPT, MAX_TOKENS)
+        require_streamed_ttft(conn.send_streaming(CACHE_PROMPT, MAX_TOKENS))
+        r_warm = conn.send_streaming(CACHE_PROMPT, MAX_TOKENS)
         record(writer, conn.pod_name, run, 0, False, EvictionPhase.PRESSURE_WARM, r_warm)
+        require_streamed_ttft(r_warm)
 
         # Fill cache with different prompts
         # New prompts every run: prompts from an earlier run are cached and
@@ -261,7 +274,10 @@ def run_pressure_test(conn, writer, threshold, n_prompts):
                 dot()
 
         # Resend original — was it evicted?
-        r_after = conn.send(CACHE_PROMPT, MAX_TOKENS)
+        r_after = conn.send_streaming(CACHE_PROMPT, MAX_TOKENS)
+        if r_after.status != 200 or r_after.error or not r_after.token_times:
+            record(writer, conn.pod_name, run, 0, False, EvictionPhase.PRESSURE_AFTER, r_after)
+            require_streamed_ttft(r_after)
         hit = CacheHit.YES if r_after.ttft_ms < threshold else CacheHit.NO
         record(writer, conn.pod_name, run, 0, False, EvictionPhase.PRESSURE_AFTER, r_after, cache_hit=hit)
         progress(f"    run {run}: {n_prompts} eviction prompts → "

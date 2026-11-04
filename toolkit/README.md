@@ -304,6 +304,11 @@ and request), and warm-ups miss the cache too. The seed includes
 other's prompts. exp8 and exp10 test the prefix cache and repeat prompts on
 purpose.
 
+exp10 measures first-token latency with streaming responses. It refuses to
+classify cache hits when a measured response lacks a first token or when the
+sampled cold and warm quartiles overlap. Latency-based labels remain empirical;
+earlier non-streaming first-byte timings are not directly comparable.
+
 `run.sh` checks this on every vLLM pod around each experiment: it snapshots
 `vllm:prompt_tokens_by_source_total` (computed locally, prefix-cache hit, or
 received over NIXL) and NIXL payload bytes (`kv_sources.py`). The analysis
