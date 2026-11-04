@@ -172,7 +172,7 @@ def main():
                     "target": tag,
                     "error": r.error,
                 }
-                if r.status != 200 or not r.token_times:
+                if not r.ok or not r.token_times:
                     rows = [{**base, "token_idx": -1, "elapsed_ms": r.total_ms, "gap_ms": 0,
                              "tokens_in_chunk": ""}]
                 else:
@@ -186,7 +186,7 @@ def main():
             wall_start = time.monotonic()
             results, total = run_load(LOAD_MODE, concurrency, TOTAL_REQUESTS, one)
             wall_s = time.monotonic() - wall_start
-            errors = sum(1 for r in results if r.status != 200 or not r.token_times)
+            errors = sum(1 for r in results if not r.ok or not r.token_times)
             progress(f" {wall_s:.1f}s | {total} requests | {total / wall_s:.1f} req/s"
                      + (f" | errors: {errors}/{total}" if errors else ""))
         progress("")

@@ -43,6 +43,8 @@ def safe_int(val, default=0):
 
 def get_status(row):
     """Get HTTP status code from a row, handling both 'status_code' and 'status' fields."""
+    if row.get("error"):
+        return 0
     return safe_int(row.get("status_code", row.get("status", 0)))
 
 

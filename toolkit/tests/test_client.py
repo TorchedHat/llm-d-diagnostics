@@ -267,6 +267,7 @@ class TestWriteRunInfo(unittest.TestCase):
 class _SSEHandler(http.server.BaseHTTPRequestHandler):
     chunks: list = []
     bodies: list = []
+    include_done = True
 
     def do_POST(self):
         self.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
@@ -275,7 +276,8 @@ class _SSEHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         for chunk in self.chunks:
             self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-        self.wfile.write(b"data: [DONE]\n\n")
+        if self.include_done:
+            self.wfile.write(b"data: [DONE]\n\n")
 
     def log_message(self, *args):
         pass
@@ -284,8 +286,9 @@ class _SSEHandler(http.server.BaseHTTPRequestHandler):
 class TestSendStreamingTokenIds(unittest.TestCase):
     """send_streaming against a local SSE server."""
 
-    def _serve(self, chunks):
-        handler = type("H", (_SSEHandler,), {"chunks": chunks, "bodies": []})
+    def _serve(self, chunks, include_done=True):
+        handler = type("H", (_SSEHandler,), {"chunks": chunks, "bodies": [],
+                                             "include_done": include_done})
         server = http.server.HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
@@ -299,6 +302,7 @@ class TestSendStreamingTokenIds(unittest.TestCase):
             {"choices": [{"text": "", "token_ids": [4]}]},   # empty text, still a token
             {"choices": [], "usage": usage}])
         r = client.send_streaming(url, "hi", 4, include_usage=True, token_ids=True)
+        self.assertTrue(r.ok)
         self.assertTrue(handler.bodies[0]["return_token_ids"])
         self.assertEqual(r.token_counts, (1, 2, 1))
         self.assertEqual(len(r.token_times), 3)
@@ -320,6 +324,50 @@ class TestSendStreamingTokenIds(unittest.TestCase):
         r = client.send_streaming(url, "hi", 2, token_ids=True)
         self.assertEqual(len(r.token_times), 2)
         self.assertEqual(r.token_counts, ())
+
+    def test_incomplete_stream_is_not_success(self):
+        url, handler = self._serve([{"choices": [{"text": "a"}]}], include_done=False)
+        result = client.send_streaming(url, "hi", 2)
+        self.assertEqual(result.status, 200)
+        self.assertFalse(result.ok)
+        self.assertIn("incomplete SSE", result.error)
+        self.assertEqual(len(handler.bodies), 1)
+
+    def test_pinned_incomplete_stream_is_not_success(self):
+        url, handler = self._serve([{"choices": [{"text": "a"}]}], include_done=False)
+        with client.PinnedConnection(url) as conn:
+            result = conn.send_streaming("hi", 2)
+        self.assertEqual(result.status, 200)
+        self.assertFalse(result.ok)
+        self.assertIn("incomplete SSE", result.error)
+        self.assertEqual(len(handler.bodies), 1)
+
+    def test_pinned_connection_does_not_retry_ambiguous_post(self):
+        class ResetConnection:
+            def __init__(self):
+                self.posts = 0
+
+            def request(self, *args, **kwargs):
+                self.posts += 1
+                raise ConnectionResetError("connection lost")
+
+            def close(self):
+                pass
+
+        for method in ("send", "send_streaming"):
+            with self.subTest(method=method):
+                conn = client.PinnedConnection("http://localhost/v1/completions")
+                underlying = ResetConnection()
+                conn._conn = underlying
+                result = getattr(conn, method)("hi", 2)
+                self.assertFalse(result.ok)
+                self.assertEqual(underlying.posts, 1)
+                self.assertIsNone(conn._conn)
+
+    def test_analyzer_excludes_recorded_stream_error(self):
+        import analyze
+        self.assertEqual(analyze.get_status({"status_code": "200", "error": "incomplete"}), 0)
+        self.assertEqual(analyze.get_status({"status_code": "200", "error": ""}), 200)
 
 
 class TestRouting(unittest.TestCase):

@@ -510,6 +510,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
     headers = request_headers(url, extra_headers)
 
     start = time.monotonic()
+    conn = None
     try:
         if use_tls:
             ctx = ssl.create_default_context()
@@ -537,6 +538,8 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
         prompt_tokens = 0
         usage_completion = 0
         last_chunk = {}
+        done = False
+        stream_error = ""
 
         # Parse SSE stream line by line
         while True:
@@ -547,10 +550,13 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
             if not line:
                 continue
             if line == "data: [DONE]":
+                done = True
                 break
             if line.startswith("data: "):
                 try:
                     chunk = json.loads(line[6:])
+                    if chunk.get("error"):
+                        stream_error = "stream reported an error"
                     choices = chunk.get("choices", [])
                     ids = (choices[0].get("token_ids") or []) if choices and token_ids else []
                     if ids:
@@ -566,7 +572,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
                         usage_completion = usage.get("completion_tokens", 0) or 0
                     last_chunk = chunk
                 except (json.JSONDecodeError, ValueError):
-                    pass
+                    stream_error = "invalid SSE data"
 
         total = time.monotonic() - start
         conn.close()
@@ -584,6 +590,7 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
             token_times=tuple(token_times),
             usage_completion_tokens=usage_completion,
             token_counts=() if ids_missing else tuple(token_counts),
+            error=stream_error or ("" if done and token_times else "incomplete SSE stream"),
         )
 
     except Exception as e:
@@ -596,6 +603,9 @@ def send_streaming(url, prompt, max_tokens=MAX_TOKENS, extra_headers=None, timeo
             completion_tokens=0,
             error=str(e),
         )
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # ── Pinned connection (protocol hygiene) ────────────────────────────────────
@@ -807,7 +817,7 @@ class PinnedConnection:
     def send(self, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         """Send a completion request, reusing the persistent connection.
 
-        On connection reset, reconnects once and retries. Returns RequestResult.
+        A failed request is not retried; the next request starts a new connection.
         """
         self._ensure_conn()
         payload = json.dumps({
@@ -817,54 +827,52 @@ class PinnedConnection:
         })
         headers = self._merge_headers(extra_headers)
 
-        for attempt in range(2):
-            start = time.monotonic()
+        start = time.monotonic()
+        try:
+            self._conn.request("POST", self._path, body=payload,
+                               headers=headers)
+            response = self._conn.getresponse()
+
+            first_byte = response.read(1)
+            ttft = time.monotonic() - start
+            rest = response.read()
+            total = time.monotonic() - start
+
+            body_bytes = first_byte + rest
+
             try:
-                self._conn.request("POST", self._path, body=payload,
-                                   headers=headers)
-                response = self._conn.getresponse()
+                body = json.loads(body_bytes)
+            except (json.JSONDecodeError, ValueError):
+                body = {"raw": body_bytes.decode("utf-8", errors="replace")}
 
-                first_byte = response.read(1)
-                ttft = time.monotonic() - start
-                rest = response.read()
-                total = time.monotonic() - start
+            usage = body.get("usage", {})
+            return RequestResult(
+                ttft_ms=round(ttft * 1000, 2),
+                total_ms=round(total * 1000, 2),
+                status=response.status,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                body=body,
+                error=http_error(response.status, body),
+            )
 
-                body_bytes = first_byte + rest
-
-                try:
-                    body = json.loads(body_bytes)
-                except (json.JSONDecodeError, ValueError):
-                    body = {"raw": body_bytes.decode("utf-8", errors="replace")}
-
-                usage = body.get("usage", {})
-                return RequestResult(
-                    ttft_ms=round(ttft * 1000, 2),
-                    total_ms=round(total * 1000, 2),
-                    status=response.status,
-                    prompt_tokens=usage.get("prompt_tokens", 0),
-                    completion_tokens=usage.get("completion_tokens", 0),
-                    body=body,
-                    error=http_error(response.status, body),
-                )
-
-            except (ConnectionResetError, BrokenPipeError,
-                    http.client.RemoteDisconnected, OSError) as e:
-                if attempt == 0:
-                    self._reconnect()
-                    continue
-                elapsed = time.monotonic() - start
-                return RequestResult(
-                    ttft_ms=0, total_ms=round(elapsed * 1000, 2),
-                    status=0, prompt_tokens=0, completion_tokens=0,
-                    error=str(e),
-                )
-            except Exception as e:
-                elapsed = time.monotonic() - start
-                return RequestResult(
-                    ttft_ms=0, total_ms=round(elapsed * 1000, 2),
-                    status=0, prompt_tokens=0, completion_tokens=0,
-                    error=str(e),
-                )
+        except (ConnectionResetError, BrokenPipeError,
+                http.client.RemoteDisconnected, OSError) as e:
+            self.close()
+            elapsed = time.monotonic() - start
+            return RequestResult(
+                ttft_ms=0, total_ms=round(elapsed * 1000, 2),
+                status=0, prompt_tokens=0, completion_tokens=0,
+                error=str(e),
+            )
+        except Exception as e:
+            self.close()
+            elapsed = time.monotonic() - start
+            return RequestResult(
+                ttft_ms=0, total_ms=round(elapsed * 1000, 2),
+                status=0, prompt_tokens=0, completion_tokens=0,
+                error=str(e),
+            )
 
     def send_streaming(self, prompt, max_tokens=MAX_TOKENS, extra_headers=None):
         """Send a streaming completion request, reusing the persistent connection.
@@ -880,82 +888,89 @@ class PinnedConnection:
         })
         headers = self._merge_headers(extra_headers)
 
-        for attempt in range(2):
-            start = time.monotonic()
-            try:
-                self._conn.request("POST", self._path, body=payload,
-                                   headers=headers)
-                response = self._conn.getresponse()
+        start = time.monotonic()
+        try:
+            self._conn.request("POST", self._path, body=payload,
+                               headers=headers)
+            response = self._conn.getresponse()
 
-                status = response.status
-                if status != 200:
-                    body = {"raw": response.read().decode("utf-8", errors="replace")}
-                    return RequestResult(
-                        ttft_ms=0, total_ms=round((time.monotonic() - start) * 1000, 2),
-                        status=status, prompt_tokens=0, completion_tokens=0,
-                        body=body, error=http_error(status, body),
-                    )
-                token_times = []
-                prompt_tokens = 0
-                last_chunk = {}
-
-                while True:
-                    line = response.readline()
-                    if not line:
-                        break
-                    line = line.decode("utf-8", errors="replace").strip()
-                    if not line:
-                        continue
-                    if line == "data: [DONE]":
-                        # Drain remaining chunked response data so the
-                        # connection is reusable for the next request.
-                        response.read()
-                        break
-                    if line.startswith("data: "):
-                        try:
-                            chunk = json.loads(line[6:])
-                            choices = chunk.get("choices", [])
-                            if choices and choices[0].get("text", ""):
-                                token_times.append(time.monotonic() - start)
-                            usage = chunk.get("usage")
-                            if usage:
-                                prompt_tokens = usage.get("prompt_tokens", 0)
-                            last_chunk = chunk
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-
-                total = time.monotonic() - start
-                ct = len(token_times)
-                ttft = token_times[0] if token_times else total
-
+            status = response.status
+            if status != 200:
+                body = {"raw": response.read().decode("utf-8", errors="replace")}
                 return RequestResult(
-                    ttft_ms=round(ttft * 1000, 2),
-                    total_ms=round(total * 1000, 2),
-                    status=status,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=ct,
-                    body=last_chunk,
-                    token_times=tuple(token_times),
+                    ttft_ms=0, total_ms=round((time.monotonic() - start) * 1000, 2),
+                    status=status, prompt_tokens=0, completion_tokens=0,
+                    body=body, error=http_error(status, body),
                 )
+            token_times = []
+            prompt_tokens = 0
+            last_chunk = {}
+            done = False
+            stream_error = ""
 
-            except (ConnectionResetError, BrokenPipeError,
-                    http.client.RemoteDisconnected, OSError) as e:
-                if attempt == 0:
-                    self._reconnect()
+            while True:
+                line = response.readline()
+                if not line:
+                    break
+                line = line.decode("utf-8", errors="replace").strip()
+                if not line:
                     continue
-                elapsed = time.monotonic() - start
-                return RequestResult(
-                    ttft_ms=0, total_ms=round(elapsed * 1000, 2),
-                    status=0, prompt_tokens=0, completion_tokens=0,
-                    error=str(e),
-                )
-            except Exception as e:
-                elapsed = time.monotonic() - start
-                return RequestResult(
-                    ttft_ms=0, total_ms=round(elapsed * 1000, 2),
-                    status=0, prompt_tokens=0, completion_tokens=0,
-                    error=str(e),
-                )
+                if line == "data: [DONE]":
+                    done = True
+                    # Drain remaining chunked response data so the
+                    # connection is reusable for the next request.
+                    response.read()
+                    break
+                if line.startswith("data: "):
+                    try:
+                        chunk = json.loads(line[6:])
+                        if chunk.get("error"):
+                            stream_error = "stream reported an error"
+                        choices = chunk.get("choices", [])
+                        if choices and choices[0].get("text", ""):
+                            token_times.append(time.monotonic() - start)
+                        usage = chunk.get("usage")
+                        if usage:
+                            prompt_tokens = usage.get("prompt_tokens", 0)
+                        last_chunk = chunk
+                    except (json.JSONDecodeError, ValueError):
+                        stream_error = "invalid SSE data"
+
+            total = time.monotonic() - start
+            ct = len(token_times)
+            ttft = token_times[0] if token_times else total
+            error = stream_error or ("" if done and token_times else "incomplete SSE stream")
+            if error:
+                self.close()
+
+            return RequestResult(
+                ttft_ms=round(ttft * 1000, 2),
+                total_ms=round(total * 1000, 2),
+                status=status,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=ct,
+                body=last_chunk,
+                token_times=tuple(token_times),
+                error=error,
+            )
+
+        except (ConnectionResetError, BrokenPipeError,
+                http.client.RemoteDisconnected, OSError) as e:
+            self.close()
+            elapsed = time.monotonic() - start
+            return RequestResult(
+                ttft_ms=0, total_ms=round(elapsed * 1000, 2),
+                status=0, prompt_tokens=0, completion_tokens=0,
+                error=str(e),
+            )
+        except Exception as e:
+            self.close()
+            elapsed = time.monotonic() - start
+            return RequestResult(
+                ttft_ms=0, total_ms=round(elapsed * 1000, 2),
+                status=0, prompt_tokens=0, completion_tokens=0,
+                error=str(e),
+            )
 
     def warmup(self, prompt, max_tokens=MAX_TOKENS, n=None, extra_headers=None):
         """Send warmup requests. First request triggers TLS handshake."""

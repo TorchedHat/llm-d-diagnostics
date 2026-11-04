@@ -203,12 +203,12 @@ def main():
                     wall_start = time.monotonic()
                     results, total = run_load(LOAD_MODE, concurrency, TOTAL_REQUESTS, one)
                     wall_s = time.monotonic() - wall_start
-                    errors = sum(1 for r in results if r.status != 200)
+                    errors = sum(1 for r in results if not r.ok)
                     progress(f" {wall_s:.1f}s | {total} requests | {total / wall_s:.1f} req/s"
                              + (f" | errors: {errors}/{total}" if errors else ""))
 
                     tokens = sorted((r.usage_completion_tokens or r.completion_tokens)
-                                    for r in results if r.status == 200)
+                                    for r in results if r.ok)
                     if tokens and tokens[len(tokens) // 2] < 0.8 * max_tokens:
                         progress(f"    WARNING: median completion tokens {tokens[len(tokens) // 2]} "
                                  f"< 80% of target {max_tokens} (set IGNORE_EOS=1)")
