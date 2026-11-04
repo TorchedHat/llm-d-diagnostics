@@ -101,14 +101,23 @@ if ConfigThroughput.DISAGG_EPP in CONFIGS and not epp_enabled():
 def mean_itl_ms(r):
     """Mean inter-token latency of one streamed request, or 0 if undefined.
 
-    Uses the server's token count when reported, since streamed chunks can
-    undercount tokens that decode to empty text.
+    Ends at the last content event, excluding stream cleanup. Without token IDs,
+    the fallback assumes one token per content event when counts match.
     """
     if not r.token_times:
         return 0.0
     tokens = r.usage_completion_tokens or r.completion_tokens
-    if tokens > 1 and r.ttft_ms > 0 and r.total_ms > r.ttft_ms:
-        return (r.total_ms - r.ttft_ms) / (tokens - 1)
+    if tokens <= 1 or len(r.token_times) < 2:
+        return 0.0
+    if r.token_counts:
+        if (len(r.token_counts) != len(r.token_times) or r.token_counts[0] != 1
+                or any(type(count) is not int or count < 1 for count in r.token_counts)
+                or sum(r.token_counts) != tokens):
+            return 0.0
+    elif len(r.token_times) != tokens:
+        return 0.0
+    if r.token_times[-1] > r.token_times[0]:
+        return (r.token_times[-1] - r.token_times[0]) * 1000 / (tokens - 1)
     return 0.0
 
 
@@ -116,7 +125,7 @@ def send(url, headers, prompt, max_tokens):
     if STREAMING:
         return send_streaming(url, prompt, max_tokens, extra_headers=headers,
                               timeout=STREAM_TIMEOUT, ignore_eos=IGNORE_EOS,
-                              include_usage=True)
+                              include_usage=True, token_ids=True)
     return send_request(url, prompt, max_tokens, extra_headers=headers,
                         ignore_eos=IGNORE_EOS)
 

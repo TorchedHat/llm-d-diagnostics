@@ -23,7 +23,7 @@ class TestRunShForwarding(unittest.TestCase):
     def test_every_env_parameter_is_forwarded(self):
         used = set()
         for path in glob.glob(os.path.join(TOOLKIT, "*.py")):
-            used |= set(re.findall(r'env\("([A-Z_0-9]+)"', _read(path)))
+            used |= set(re.findall(r'(?:env|_ints|_opt_float)\("([A-Z_0-9]+)"', _read(path)))
 
         run_sh = _read(os.path.join(TOOLKIT, "run.sh"))
         block = re.search(r'EXPERIMENT_ENV_VARS="(.*?)"', run_sh, re.S)

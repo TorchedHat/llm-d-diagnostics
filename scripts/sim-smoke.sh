@@ -148,10 +148,12 @@ checks = [
 for name, value, lo, hi in checks:
     if value is None or not lo <= value <= hi:
         problems.append(f"exp18: {name} = {value}, expected {lo}..{hi}")
-# The simulator never slows decode for a prefill, so it has no true overlap
-# value: this checks only that the phase runs. theta needs a GPU.
-if cal.get("overlap_theta") is None:
-    problems.append("exp18: overlap step did not run")
+# The simulator does not establish a chunk budget or true overlap. The stall
+# is retained, but theta must remain unavailable without a single-step bound.
+if cal.get("overlap_mixed_step_s") is None:
+    problems.append("exp18: overlap stall was not recorded")
+if cal.get("overlap_theta") is not None:
+    problems.append("exp18: theta was reported without a chunk budget")
 
 if problems:
     print("SIM SMOKE FAILED:")

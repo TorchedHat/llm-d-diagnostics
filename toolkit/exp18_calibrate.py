@@ -41,8 +41,8 @@ TRANSFER_BW_BYTES_PER_S to include it in calibration.json.
 
 Output:
     data/exp18-results.csv   raw measurements
-    data/calibration.json    fitted coefficients, in the per-model format
-                             the planning model reads (status "calibrated")
+    data/calibration.json    fitted coefficients, phase status and warnings;
+                             skipped or incomplete phases are marked partial
 
 Usage: python3 toolkit/exp18_calibrate.py
 
@@ -285,7 +285,7 @@ def phase_prefill(writer, warnings):
         for run in range(1, PREFILL_RUNS + 1):
             r = _stream(_prompt(s, "prefill", run), 1)
             _row(writer, "prefill", "ttft", s, run, r.ttft_ms / 1000, "s", r)
-            if r.status == 200 and r.token_times:
+            if r.ok and r.token_times:
                 ttfts.append((r.prompt_tokens or s, r.ttft_ms / 1000))
             dot()
         if ttfts:
@@ -318,7 +318,7 @@ def phase_decode(writer, warnings):
                                               ("decode", prompt_tokens, batch, run))
                 for th in threads:
                     th.join()
-                failed = [r for _, r in out if r.status != 200]
+                failed = [r for _, r in out if not r.ok]
                 if failed:
                     warnings.append(f"decode: B={batch} prompt={prompt_tokens} run {run}: "
                                     f"{len(failed)} failed requests")
@@ -426,7 +426,8 @@ def phase_overlap(writer, warnings, prefill, decode):
     if delay + chunk + 20 * step > OVERLAP_OUTPUT_TOKENS * step:
         warnings.append("overlap: decoders may finish before the injection; "
                         "raise OVERLAP_OUTPUT_TOKENS")
-    thetas, mixed_steps, decode_steps, chunk_runs, served_runs = [], [], [], [], []
+    thetas, theta_chunks, theta_steps = [], [], []
+    mixed_steps, decode_steps, chunk_runs, served_runs = [], [], [], []
     for run in range(1, OVERLAP_RUNS + 1):
         threads, out = _start_streams(b, dec_prompt, OVERLAP_OUTPUT_TOKENS,
                                       ("overlap", run))
@@ -436,7 +437,7 @@ def phase_overlap(writer, warnings, prefill, decode):
         inject_end = inject_start + injected.ttft_ms / 1000
         for th in threads:
             th.join()
-        if injected.status != 200 or any(r.status != 200 for _, r in out):
+        if not injected.ok or any(not r.ok for _, r in out):
             warnings.append(f"overlap: run {run} had failed requests")
             continue
         if CHUNK_BUDGET and injected.prompt_tokens > int(CHUNK_BUDGET):
@@ -473,32 +474,44 @@ def phase_overlap(writer, warnings, prefill, decode):
         served = injected.prompt_tokens or OVERLAP_PROMPT_TOKENS
         chunk_run = (prefill["prefill_a_s_per_token"] * served
                      + prefill["prefill_b_s_per_token2"] * served ** 2)
-        theta = overlap_theta(mixed, chunk_run, decode_step)
-        thetas.append(theta)
         mixed_steps.append(mixed)
         decode_steps.append(decode_step)
         chunk_runs.append(chunk_run)
         served_runs.append(served)
         _row(writer, "overlap", "mixed_step", OVERLAP_PROMPT_TOKENS, run, mixed, "s", injected)
         _row(writer, "overlap", "decode_step", b, run, decode_step, "s")
-        _row(writer, "overlap", "theta", OVERLAP_PROMPT_TOKENS, run, theta, "ratio",
-             r=injected, detail=f"chunk_compute_s={chunk_run:.6f}")
+        # Active decoders consume one scheduled token each. If the prompt
+        # cannot fit beside them in one step, a single-chunk theta is invalid.
+        if not CHUNK_BUDGET or not injected.prompt_tokens or served + b > int(CHUNK_BUDGET):
+            warnings.append(f"overlap: run {run}: single-step fit not established; "
+                            "stall retained but theta unavailable")
+        else:
+            theta = overlap_theta(mixed, chunk_run, decode_step)
+            thetas.append(theta)
+            theta_chunks.append(chunk_run)
+            theta_steps.append(decode_step)
+            _row(writer, "overlap", "theta", OVERLAP_PROMPT_TOKENS, run, theta, "ratio",
+                 r=injected, detail=f"chunk_compute_s={chunk_run:.6f}")
         dot()
     progress("")
-    if not thetas:
+    if not mixed_steps:
         return None
-    theta = statistics.median(thetas)
-    sigma = theta_uncertainty(statistics.median(chunk_runs), statistics.median(decode_steps))
-    if sigma > 0.5:  # theta lies in [0, 1]: +/- 0.5 cannot tell 0 from 1
+    theta = statistics.median(thetas) if thetas else None
+    sigma = (theta_uncertainty(statistics.median(theta_chunks), statistics.median(theta_steps))
+             if thetas else None)
+    if sigma is not None and sigma > 0.5:
         warnings.append(f"overlap: theta is poorly determined (+/- {sigma:.1f}): the injected "
                         f"prompt's compute ({statistics.median(chunk_runs) * 1000:.0f} ms) is many "
                         "decode steps long, and theta divides their small difference by one "
                         "step. Use OVERLAP_PROMPT_TOKENS of about 512; the stall is still valid")
-    if not -0.5 <= theta <= 1.5:
+    if theta is not None and not -0.5 <= theta <= 1.5:
         warnings.append(f"overlap: theta={theta:.2f} is far outside [0, 1]: the server did not "
                         "stall decode for the chunk, or the prompt spanned several chunks")
     mixed = statistics.median(mixed_steps)
-    progress(f"  theta={theta:.2f} (runs: {', '.join(f'{t:.2f}' for t in thetas)})")
+    if theta is not None:
+        progress(f"  theta={theta:.2f} (runs: {', '.join(f'{t:.2f}' for t in thetas)})")
+    else:
+        progress("  theta unavailable")
     progress(f"  stall: decoders' longest gap during a {statistics.median(served_runs):.0f}-token prompt "
              f"{mixed * 1000:.1f} ms (decode step {statistics.median(decode_steps) * 1000:.1f} ms)")
     return {"overlap_theta": theta, "overlap_theta_uncertainty": sigma, "overlap_runs": thetas,
@@ -530,15 +543,34 @@ def main():
     progress("")
 
     warnings = []
-    prefill = None if "prefill" in SKIP_PHASES else phase_prefill(writer, warnings)
-    decode = None if "decode" in SKIP_PHASES else phase_decode(writer, warnings)
-    kv = None if "kv" in SKIP_PHASES else phase_kv(warnings)
-    overlap = (None if "overlap" in SKIP_PHASES
-               else phase_overlap(writer, warnings, prefill, decode))
+    phase_status = {}
+    def run_phase(name, fn, *args):
+        if name in SKIP_PHASES:
+            phase_status[name] = "skipped"
+            return None
+        try:
+            result = fn(*args)
+        except (OSError, ValueError, ArithmeticError) as exc:
+            warnings.append(f"{name}: failed: {exc}")
+            result = None
+        phase_status[name] = "ok" if result else "failed"
+        return result
+
+    prefill = run_phase("prefill", phase_prefill, writer, warnings)
+    decode = run_phase("decode", phase_decode, writer, warnings)
+    kv = run_phase("kv", phase_kv, warnings)
+    overlap = run_phase("overlap", phase_overlap, writer, warnings, prefill, decode)
+    if overlap and overlap.get("overlap_theta") is None:
+        phase_status["overlap"] = "partial"
     writer.close()
 
+    statuses = list(phase_status.values())
+    status = ("calibrated" if all(s == "ok" for s in statuses) else
+              "failed" if all(s in {"failed", "skipped"} for s in statuses) else "partial")
+
     calibration = {
-        "status": "calibrated",
+        "status": status,
+        "phase_status": phase_status,
         "model": MODEL,
         "run_dir": os.path.abspath(DATA_DIR),
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

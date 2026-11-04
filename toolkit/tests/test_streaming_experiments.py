@@ -19,10 +19,12 @@ from client import RequestResult, batched, closed_loop, route_throughput, run_lo
 from schemas import ConfigThroughput, Exp12Row, Exp16Row, fields_for
 
 
-def _result(token_times=(), ttft_ms=0.0, total_ms=0.0, completion_tokens=0, usage=0):
+def _result(token_times=(), ttft_ms=0.0, total_ms=0.0, completion_tokens=0, usage=0,
+            token_counts=()):
     return RequestResult(ttft_ms=ttft_ms, total_ms=total_ms, status=200,
                          prompt_tokens=100, completion_tokens=completion_tokens,
-                         token_times=tuple(token_times), usage_completion_tokens=usage)
+                         token_times=tuple(token_times), token_counts=tuple(token_counts),
+                         usage_completion_tokens=usage)
 
 
 def _write(path, row_type, rows):
@@ -54,13 +56,18 @@ def _exp12_row(cfg, run, total, itl, tokens=100, status=200, load_mode="batch"):
 class TestHelpers(unittest.TestCase):
 
     def test_mean_itl(self):
-        r = _result(token_times=(0.1,), ttft_ms=100.0, total_ms=1090.0, completion_tokens=100)
+        r = _result(token_times=(0.1, 0.11, 0.12), ttft_ms=100.0,
+                    total_ms=1000.0, completion_tokens=3, token_counts=(1, 1, 1))
         self.assertAlmostEqual(mean_itl_ms(r), 10.0)
 
     def test_mean_itl_prefers_server_count(self):
-        r = _result(token_times=(0.1,), ttft_ms=100.0, total_ms=1090.0,
-                    completion_tokens=50, usage=100)
+        r = _result(token_times=(0.1, 0.11, 0.12), ttft_ms=100.0, total_ms=1000.0,
+                    completion_tokens=2, usage=3, token_counts=(1, 1, 1))
         self.assertAlmostEqual(mean_itl_ms(r), 10.0)
+
+    def test_first_multi_token_chunk_cannot_supply_mean_itl(self):
+        r = _result(token_times=(0.1, 0.11), completion_tokens=3, token_counts=(2, 1))
+        self.assertEqual(mean_itl_ms(r), 0.0)
 
     def test_mean_itl_undefined_without_streaming(self):
         r = _result(ttft_ms=1000.0, total_ms=1000.0, completion_tokens=100)
