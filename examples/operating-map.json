@@ -1,0 +1,8 @@
+{
+  "schema_version": "llmd-diagnostics-operating-map/v1",
+  "arms": ["MONO", "PD-2:2", "PD-1:3"],
+  "repeats": [0, 1],
+  "declared_gpus_per_arm": 8,
+  "practical_margin": 0.05,
+  "min_observed_attainment": null
+}
