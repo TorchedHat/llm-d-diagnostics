@@ -82,6 +82,11 @@ cluster's `env.sh`. Applicable experiments add an EPP arm. Set
 
 ### Standalone metrics collection
 
+The explicit `bandwidth` command requires Python 3.10+ in the client pod
+and locally. Run `./toolkit/run.sh CLUSTER_DIR bandwidth CONFIG.json` against
+an existing deployment. See [the bandwidth guide](../docs/bandwidth.md) for
+TP tracing, payload accounting, controls, and standalone analysis.
+
 ```bash
 # Scrape vLLM /metrics for 60 seconds
 COLLECT_DURATION=60 ./toolkit/run.sh clusters/my-cluster metrics

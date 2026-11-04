@@ -1,0 +1,34 @@
+{
+  "model": "Qwen/Qwen3-32B",
+  "tokenize_url": "http://prefill-pod:8000/tokenize",
+  "transport": "rdma-configured",
+  "tensor_parallel_size": 2,
+  "rank_trace_url": "http://decode-pod:9109/snapshot",
+  "prefill": {
+    "label": "prefill",
+    "url": "http://prefill-pod:8000/v1/completions",
+    "metrics_url": "http://prefill-pod:8000/metrics"
+  },
+  "decode": {
+    "label": "decode",
+    "url": "http://decode-pod:8000/v1/completions",
+    "metrics_url": "http://decode-pod:8001/metrics",
+    "headers": {"x-prefiller-host-port": "prefill-pod:8000"}
+  },
+  "deployment_settings": {
+    "weight_dtype": "bf16",
+    "kv_dtype": "bf16",
+    "prefill_gpus": 2,
+    "decode_gpus": 2,
+    "placement": "one TP2 engine per node, two distinct nodes"
+  },
+  "prompt_lengths": [512, 2000, 8000, 16000, 32000],
+  "runs": 30,
+  "warmup": 3,
+  "prefill_backoff_tokens": 0,
+  "aggregate_prompt_tokens": 8000,
+  "concurrency_levels": [1, 4, 16],
+  "aggregate_requests": 100,
+  "timeout": 300,
+  "metrics_timeout": 30
+}
