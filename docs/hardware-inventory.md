@@ -24,3 +24,12 @@ capacity, GPU isolation, bandwidth, the network route used by a request, RDMA or
 GPUDirect. The output contains cluster, node, pod and IP metadata; review it before
 sharing. UCX environment collection is limited to named settings and does not read
 credential variables.
+
+## Example: two H100 pods
+
+A short inventory smoke on two separately scheduled OpenShift pods, each with
+one GPU claim and one shared RDMA resource, found an H100 80GB and active
+Ethernet RDMA ports visible in each container. Both pods had a one-CPU cgroup
+limit and a 2 GiB memory limit. Pod identities and restart counts were stable
+through collection. The probe did not run inference or transfer data; visible
+ports do not establish the transport used by a workload.
